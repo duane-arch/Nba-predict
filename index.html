@@ -17,7 +17,7 @@
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  padding:max(12px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(160px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}
+  padding:max(12px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(100px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}
 [hidden]{display:none!important}
 .wrap{max-width:640px;margin:0 auto}
 button,select{font:inherit}
@@ -96,7 +96,7 @@ td.n,th.n{text-align:right}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 button.chip{min-height:40px;padding:0 12px;border-radius:20px;border:1px solid var(--line);background:transparent;color:var(--ok);font:inherit;font-size:12.5px;font-weight:600}
 button.chip[aria-pressed="true"]{background:var(--ok);color:#06150e;border-color:var(--ok)}
-.ticket{position:fixed;left:0;right:0;bottom:calc(132px + env(safe-area-inset-bottom));max-height:62vh;overflow:auto;background:var(--panel);border-top:1px solid var(--acc);border-radius:14px 14px 0 0;padding:0 max(16px,env(safe-area-inset-right)) 0 max(16px,env(safe-area-inset-left))}
+.ticket{position:fixed;left:0;right:0;bottom:calc(78px + env(safe-area-inset-bottom));max-height:62vh;overflow:auto;background:var(--panel);border-top:1px solid var(--acc);border-radius:14px 14px 0 0;padding:0 max(16px,env(safe-area-inset-right)) 0 max(16px,env(safe-area-inset-left))}
 .tkbar{display:flex;justify-content:space-between;align-items:center;width:100%;min-height:48px;background:transparent;border:0;color:var(--acc);font:inherit;font-weight:700;padding:0}
 .tkbody{padding-bottom:14px}
 .tl{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--line)}
@@ -110,7 +110,7 @@ button.chip[aria-pressed="true"]{background:var(--ok);color:#06150e;border-color
 .tk3 .more{margin:0}
 .more.pri{background:var(--acc);color:#1a1205;border-color:var(--acc)}
 .more[disabled]{opacity:.5}
-body.tk{padding-bottom:calc(240px + env(safe-area-inset-bottom))}
+body.tk{padding-bottom:calc(190px + env(safe-area-inset-bottom))}
 .jst{margin:14px 0 4px}
 .bet{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;flex-direction:column;gap:4px}
 .bh{display:flex;justify-content:space-between;gap:8px;font-size:14px}
@@ -125,7 +125,7 @@ body.tk{padding-bottom:calc(240px + env(safe-area-inset-bottom))}
 .keybox .more{width:auto;margin:0;padding:0 16px}
 /* barre du bas */
 nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top:1px solid var(--line);
-  padding:8px max(12px,env(safe-area-inset-right)) max(68px,calc(14px + env(safe-area-inset-bottom))) max(12px,env(safe-area-inset-left))}
+  padding:8px max(12px,env(safe-area-inset-right)) max(14px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
 .tabs-in{display:flex;gap:4px;max-width:640px;margin:0 auto}
 .tab{flex:1;min-height:56px;border:0;background:transparent;color:var(--mut);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:12px;font-weight:600;padding:0}
 .tab .chip{display:flex;align-items:center;justify-content:center;width:52px;height:30px;border-radius:15px}
@@ -185,9 +185,9 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
     <div id="totstats" class="stats"></div>
     <h2>Classement Elo</h2>
     <div class="scroll"><table id="rank"></table></div>
-    <h2>Cotes Betclic</h2>
-    <div class="keybox"><input id="oddsKey" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Clé The Odds API" aria-label="Clé The Odds API"><button id="saveKey" class="more" type="button">Enregistrer</button></div>
-    <p class="note" id="oddsInfo"></p>
+    <h2 hidden>Cotes Betclic</h2>
+    <div class="keybox" hidden><input id="oddsKey" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Clé The Odds API" aria-label="Clé The Odds API"><button id="saveKey" class="more" type="button">Enregistrer</button></div>
+    <p class="note" id="oddsInfo" hidden></p>
     <p class="note" id="modelnote"></p>
   </section>
 </div>

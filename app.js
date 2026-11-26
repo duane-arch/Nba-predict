@@ -493,6 +493,7 @@ function lineTxt(s, H, A) {
 const winTxt = (m, H, A, d = 1) => `${m >= 0 ? H.ab : A.ab} +${fr(Math.abs(m), d)}`;   // « BOS +5,5 » : BOS gagne de 5,5
 
 // ---------- Cotes Betclic (The Odds API, clé gratuite saisie dans l'appli) ----------
+const ODDS_ON = false;   // cotes Betclic : mises en suspens (remettre à true pour les réactiver)
 const ODDS_URL = 'https://api.the-odds-api.com/v4/sports/basketball_nba/odds/';
 const KEY_LS = 'nbaPredict.oddsKey';
 const SIG_M = 12, EV_MIN = 0.03, EV_PICK = 0.05, EV_SUSPECT = 0.15;   // écart-type d'une marge NBA ; seuils de valeur
@@ -504,6 +505,7 @@ const Phi = (z) => {                                // loi normale : probabilit�
   return z > 0 ? 1 - q : q;
 };
 async function fetchOdds(maxAge) {
+  if (!ODDS_ON) return;
   const key = getKey(); if (!key) return;
   if (db.odds && Date.now() - Date.parse(db.odds.at) < maxAge) return;
   const r = await fetch(`${ODDS_URL}?apiKey=${encodeURIComponent(key)}&bookmakers=betclic_fr&markets=h2h,spreads,totals&oddsFormat=decimal&dateFormat=iso`);
@@ -538,7 +540,7 @@ function findOdds(g) {
 }
 // Cotes Betclic d'un match + valeur (probabilité du modèle × cote − 1) de chaque pari possible.
 function oddsBlock(g, M, ctx) {
-  const o = findOdds(g); if (!o) return { html: '', bets: [] };
+  const o = ODDS_ON ? findOdds(g) : null; if (!o) return { html: '', bets: [] };
   const H = T(g.h), A = T(g.a), bets = [], parts = [];
   const sigT = M.sigT || (M.tot.mae || 14) * 1.2533;
   if (o.ml) {
@@ -581,7 +583,7 @@ function upCard(g, M, picks) {
   const ph = M.winP(g.h, g.a, day), pa = 1 - ph, margin = diff / PTS;
   const time = new Date(g.t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
   const spread = g.odds ? parseSpread(g.odds.details, H.ab, A.ab) : null;
-  let tag = '', tagCls = '', l2 = 'Pas de cote disponible';
+  let tag = '', tagCls = '', l2 = 'Pas de ligne ESPN pour le moment';
   if (spread !== null) {
     const gap = margin - spread;
     tag = `Écart ${fr(Math.abs(gap))} pts pour ${gap >= 0 ? H.ab : A.ab}`; tagCls = Math.abs(gap) >= 3 ? 'pick' : '';
@@ -595,7 +597,7 @@ function upCard(g, M, picks) {
   } else l3 += ' · pas de ligne O/U pour l\'instant';
   const mh = missX(M, g.h), ma = missX(M, g.a);
   const abTxt = (m, ab) => m.list.length ? `${esc(ab)} : ${m.list.map((p) => `${esc(p.name)} (${esc(p.status)})`).join(', ')}` : '';
-  const ab = [abTxt(ma, A.ab), abTxt(mh, H.ab)].filter(Boolean);
+  const ab = [abTxt(mh, H.ab), abTxt(ma, A.ab)].filter(Boolean);
   const abEff = M.prm.ABS * (ma.x - mh.x) / PTS;
   const abLine = ab.length ? `<div class="line">Absents importants · ${ab.join(' · ')}${M.prm.ABS > 0 ? ` → <b>${abEff >= 0 ? esc(H.ab) : esc(A.ab)} ${signed(Math.abs(abEff), 1)} pts</b>` : ''}</div>` : '';
   const sb = safeBets(H, A, ph, margin, pt.tot, M.sigT, M.sigM);
@@ -606,9 +608,9 @@ function upCard(g, M, picks) {
   if (picks) for (const b of bt.bets) picks.push({ ...b, g, time });
   return `<div class="card">
     <div class="meta"><span>${esc(time)}${g.live ? ' · <span class="live">EN COURS</span>' : ''}</span><span class="${tagCls}">${esc(tag)}</span></div>
-    <div class="teams"><span>${esc(A.n)}</span><span class="at">@</span><span>${esc(H.n)}</span></div>
-    <div class="bar"><i class="a" style="width:${(pa * 100).toFixed(1)}%"></i><i class="h" style="width:${(ph * 100).toFixed(1)}%"></i></div>
-    <div class="probs"><span>${esc(A.ab)} ${(pa * 100).toFixed(0)}%</span><span>${esc(H.ab)} ${(ph * 100).toFixed(0)}%</span></div>
+    <div class="teams"><span>${esc(H.n)}</span><span class="at">vs</span><span>${esc(A.n)}</span></div>
+    <div class="bar"><i class="h" style="width:${(ph * 100).toFixed(1)}%"></i><i class="a" style="width:${(pa * 100).toFixed(1)}%"></i></div>
+    <div class="probs"><span>${esc(H.ab)} ${(ph * 100).toFixed(0)}%</span><span>${esc(A.ab)} ${(pa * 100).toFixed(0)}%</span></div>
     <div class="line">Marge modèle : <b>${esc(winTxt(margin, H, A))}</b></div>
     <div class="line">${l2}</div>
     <div class="line">${l3}</div>${abLine}${sbLine}${bt.html}</div>`;
@@ -628,7 +630,7 @@ function renderUp(M) {
   box.innerHTML = html;
   const top = picks.filter((b) => b.ev >= EV_PICK).sort((x, y) => y.ev - x.ev).slice(0, 5);
   $('#picks').innerHTML = top.length
-    ? `<h2>Paris à valeur (Betclic)</h2><div class="grp picks">` + top.map((b) => `<div class="pk"><div><b>${esc(b.label)}</b> @ ${fr(b.odds, 2)}<span>${esc(T(b.g.a).ab)} @ ${esc(T(b.g.h).ab)} · ${esc(b.time)}</span></div><div class="${b.ev >= EV_SUSPECT ? 'ko' : 'ok'}">${signed(b.ev * 100)} %${b.ev >= EV_SUSPECT ? '<span>à vérifier</span>' : ''}</div></div>`).join('') + `</div><p class="note">Valeur = probabilité du modèle × cote − 1. Un écart très grand vient souvent d'une info que le modèle n'a pas (blessure, repos) : vérifie avant de miser.</p>`
+    ? `<h2>Paris à valeur (Betclic)</h2><div class="grp picks">` + top.map((b) => `<div class="pk"><div><b>${esc(b.label)}</b> @ ${fr(b.odds, 2)}<span>${esc(T(b.g.h).ab)} vs ${esc(T(b.g.a).ab)} · ${esc(b.time)}</span></div><div class="${b.ev >= EV_SUSPECT ? 'ko' : 'ok'}">${signed(b.ev * 100)} %${b.ev >= EV_SUSPECT ? '<span>à vérifier</span>' : ''}</div></div>`).join('') + `</div><p class="note">Valeur = probabilité du modèle × cote − 1. Un écart très grand vient souvent d'une info que le modèle n'a pas (blessure, repos) : vérifie avant de miser.</p>`
     : '';
 }
 
@@ -706,7 +708,7 @@ function renderModel(M) {
   $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
     : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
     : 'Clé enregistrée, cotes pas encore chargées.';
-  $('#modelnote').textContent = `Modèle v4.0 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#modelnote').textContent = `Modèle v4.1 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
@@ -745,7 +747,7 @@ function qTable(g, H, Aw) {
   const n = Math.max(g.ls.a.length, g.ls.h.length), cols = Array.from({ length: n }, (_, i) => i);
   const head = cols.map((i) => `<th class="n">${i < 4 ? 'Q' + (i + 1) : 'OT' + (i - 3)}</th>`).join('');
   const row = (ab, arr, tot) => `<tr><td>${esc(ab)}</td>${cols.map((i) => `<td class="n">${arr[i] ?? ''}</td>`).join('')}<td class="n"><b>${tot}</b></td></tr>`;
-  return `<div class="scroll q"><table><tr><th></th>${head}<th class="n">Total</th></tr>${row(Aw.ab, g.ls.a, g.as)}${row(H.ab, g.ls.h, g.hs)}</table></div>`;
+  return `<div class="scroll q"><table><tr><th></th>${head}<th class="n">Total</th></tr>${row(H.ab, g.ls.h, g.hs)}${row(Aw.ab, g.ls.a, g.as)}</table></div>`;
 }
 function playedRow(g, M) {
   const H = T(g.h), Aw = T(g.a), p = M.pred[g.id], tp = M.tot.pred[g.id], homeWin = g.hs > g.as;
@@ -767,7 +769,7 @@ function playedRow(g, M) {
   }
   const wa = homeWin ? '' : 'w', wh = homeWin ? 'w' : '';
   return `<details class="game"><summary>
-    <div class="sc"><div class="${wa}" title="${esc(Aw.n)}"><span>${esc(Aw.ab)}</span><span>${g.as}</span></div><div class="${wh}" title="${esc(H.n)}"><span>${esc(H.ab)}</span><span>${g.hs}</span></div></div>
+    <div class="sc"><div class="${wh}" title="${esc(H.n)}"><span>${esc(H.ab)}</span><span>${g.hs}</span></div><div class="${wa}" title="${esc(Aw.n)}"><span>${esc(Aw.ab)}</span><span>${g.as}</span></div></div>
     <div class="sep"></div><div class="rt">${right}</div></summary>
     <div class="det">${lines}${qTable(g, H, Aw)}</div></details>`;
 }
@@ -877,7 +879,7 @@ function renderTicket() {
   const rows = ticket.legs.map((l, i) => {
     const c = ctxById[l.gid]; if (!c) return '';
     const ab = { h: c.H.ab, a: c.A.ab }, hasLine = l.type !== 'win';
-    return `<div class="tl"><span>${esc(c.A.ab)} @ ${esc(c.H.ab)} · <b>${esc(legLabel(l, ab))}</b></span>${hasLine ? `<input type="number" inputmode="decimal" step="0.5" value="${l.line}" data-i="${i}" aria-label="Ligne">` : '<span></span>'}<button type="button" class="x" data-rm="${i}" aria-label="Retirer">×</button></div>`;
+    return `<div class="tl"><span>${esc(c.H.ab)} vs ${esc(c.A.ab)} · <b>${esc(legLabel(l, ab))}</b></span>${hasLine ? `<input type="number" inputmode="decimal" step="0.5" value="${l.line}" data-i="${i}" aria-label="Ligne">` : '<span></span>'}<button type="button" class="x" data-rm="${i}" aria-label="Retirer">×</button></div>`;
   }).join('');
   const keep = { odds: ($('#tkOdds') || {}).value || '', stake: ($('#tkStake') || {}).value || '' };
   box.innerHTML = `<button type="button" class="tkbar" id="tkBar"><span id="tkBarTxt"></span><span>${ticket.open ? 'Réduire ▾' : 'Ouvrir le ticket ▴'}</span></button>
@@ -930,7 +932,7 @@ function journalStats() {
 function betHtml(b) {
   const st = { open: 'En cours', won: 'Gagné', lost: 'Perdu', void: 'Remboursé', check: 'À vérifier (égalité sur une ligne)' }[b.status];
   const cls = b.status === 'won' ? 'ok' : b.status === 'lost' ? 'ko' : '';
-  const legs = b.legs.map((l) => { const r = legResult(l); return `<div class="line">${r === 'won' ? '✓' : r === 'lost' ? '✗' : r === 'push' ? '=' : '·'} ${esc(l.aa)} @ ${esc(l.ha)} · ${esc(l.label)}</div>`; }).join('');
+  const legs = b.legs.map((l) => { const r = legResult(l); return `<div class="line">${r === 'won' ? '✓' : r === 'lost' ? '✗' : r === 'push' ? '=' : '·'} ${esc(l.ha)} vs ${esc(l.aa)} · ${esc(l.label)}</div>`; }).join('');
   return `<div class="bet"><div class="bh"><b>${b.legs.length > 1 ? 'Combiné ' + b.legs.length : 'Simple'} · cote ${fr(b.odds, 2)} · mise ${fr(b.stake, 2)} €</b><span class="${cls}">${st}${b.pnl ? ' ' + signed(b.pnl, 2) + ' €' : ''}</span></div>${legs}<div class="line">Probabilité estimée ${(b.p * 100).toFixed(0)} % · ${new Date(b.at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</div><button type="button" class="del" data-del="${b.id}">Supprimer</button></div>`;
 }
 function renderJournal() {
