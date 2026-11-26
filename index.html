@@ -10,72 +10,198 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <style>
 :root{
-  --bg:#0e1116; --panel:#171b22; --line:#262c36; --fg:#e8ebf0; --mut:#8b94a3;
+  --bg:#0e1116; --nav:#11151b; --panel:#171b22; --line:#262c36; --fg:#e8ebf0; --mut:#8b94a3;
   --acc:#f2a33a; --away:#4c8dff; --home:#f2a33a; --ok:#3ecf8e; --bad:#ff6b6b;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  padding:max(12px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left));}
-main{max-width:640px;margin:0 auto}
-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px}
-h1{font-size:20px;margin:0;letter-spacing:.2px}
-h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:22px 0 8px;font-weight:600}
-button{background:var(--acc);color:#1a1205;border:0;border-radius:10px;padding:9px 14px;font:inherit;font-weight:600}
-button:disabled{opacity:.5}
-button:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
-#status{color:var(--mut);font-size:13px;min-height:1.4em}
+  padding:max(12px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(160px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}
+[hidden]{display:none!important}
+.wrap{max-width:640px;margin:0 auto}
+button,select{font:inherit}
+button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 14px}
+.top>div{min-width:0}
+h1{font-size:22px;margin:0;font-weight:700}
+#status{color:var(--mut);font-size:13px;min-height:1.4em;margin-top:2px}
 #status.err{color:var(--bad)}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
-.meta{color:var(--mut);font-size:12px;display:flex;justify-content:space-between;gap:8px}
+.icon{width:44px;height:44px;flex:none;border:0;border-radius:10px;background:var(--acc);color:#1a1205;display:flex;align-items:center;justify-content:center}
+.icon[disabled]{opacity:.6}
+.icon.busy svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.icon.busy svg{animation:none}}
+
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:22px 0 8px;font-weight:600}
+.day{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);font-weight:600;margin:16px 0 8px}
+.day:first-child{margin-top:4px}
+.dayh{display:flex;justify-content:space-between;gap:8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);font-weight:600;margin:16px 0 6px}
+.empty{color:var(--mut);padding:14px 0}
+.note{color:var(--mut);font-size:12px;margin-top:18px}
+.scroll{overflow-x:auto}
+.pick{color:var(--ok)}
+.ok{color:var(--ok);font-weight:600}
+.ko{color:var(--bad);font-weight:600}
+
+/* matchs à venir */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;flex-direction:column;gap:8px}
+.meta{display:flex;justify-content:space-between;gap:8px;color:var(--mut);font-size:12px}
 .live{color:var(--ok);font-weight:600}
-.teams{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:6px 0 8px;font-weight:600}
+.teams{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-weight:600;font-size:15px}
 .teams span{min-width:0}
 .teams .at{color:var(--mut);font-weight:400}
+.teams span:last-child{text-align:right}
 .bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--line)}
 .bar i{display:block;height:100%}
 .bar .a{background:var(--away)}
 .bar .h{background:var(--home)}
-.probs{display:flex;justify-content:space-between;margin-top:5px;font-variant-numeric:tabular-nums}
-.line{margin-top:8px;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums}
+.probs{display:flex;justify-content:space-between;font-weight:600;font-size:14px;font-variant-numeric:tabular-nums}
+.line{font-size:12.5px;color:var(--mut);line-height:1.45;font-variant-numeric:tabular-nums}
 .line b{color:var(--fg)}
-.pick{color:var(--ok)}
+.line b.pick{color:var(--ok)}
+.card .line+.line{margin-top:-4px}
+
+/* matchs joués */
+.filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px}
+select{appearance:none;-webkit-appearance:none;min-width:0;width:100%;min-height:44px;background:var(--panel) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238b94a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>") no-repeat right 8px center;color:var(--fg);border:1px solid var(--line);border-radius:22px;padding:0 28px 0 12px;font-size:14px;text-overflow:ellipsis}
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.stat b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.stat span{color:var(--mut);font-size:12.5px;line-height:1.4;display:block;margin-top:2px}
+#h2h{margin-bottom:6px}
+#h2h:empty{display:none}
+.grp{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:0 14px}
+details.game+details.game{border-top:1px solid var(--line)}
+details.game summary{display:flex;align-items:center;gap:12px;padding:11px 0;cursor:pointer;list-style:none}
+details.game summary::-webkit-details-marker{display:none}
+.sc{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;font-size:16px;font-variant-numeric:tabular-nums}
+.sc div{display:flex;justify-content:space-between;color:var(--mut)}
+.sc div.w{color:var(--fg);font-weight:700}
+.sep{width:1px;align-self:stretch;background:var(--line)}
+.rt{width:118px;display:flex;flex-direction:column;gap:2px;font-size:12.5px;color:var(--mut)}
+.det{padding:0 0 12px;display:flex;flex-direction:column;gap:4px}
+.q{margin-top:6px}
+.more{margin-top:12px;width:100%;min-height:44px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;font-weight:600}
+
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
 th{color:var(--mut);font-weight:500;font-size:12px}
 td.n,th.n{text-align:right}
-.scroll{overflow-x:auto}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
-.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
-.stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
-.stat span{color:var(--mut);font-size:12px}
-.note{color:var(--mut);font-size:12px;margin-top:18px}
-details summary{cursor:pointer;color:var(--mut);font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:22px 0 8px;font-weight:600}
-.empty{color:var(--mut);padding:14px 0}
+
+.seg{display:flex;gap:8px;margin-bottom:12px}
+.seg button{flex:1;min-height:44px;border:1px solid var(--line);border-radius:22px;background:var(--panel);color:var(--mut);font-weight:600;padding:0 12px}
+.seg button[aria-pressed="true"]{background:var(--line);color:var(--acc);border-color:var(--acc)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+button.chip{min-height:40px;padding:0 12px;border-radius:20px;border:1px solid var(--line);background:transparent;color:var(--ok);font:inherit;font-size:12.5px;font-weight:600}
+button.chip[aria-pressed="true"]{background:var(--ok);color:#06150e;border-color:var(--ok)}
+.ticket{position:fixed;left:0;right:0;bottom:calc(132px + env(safe-area-inset-bottom));max-height:62vh;overflow:auto;background:var(--panel);border-top:1px solid var(--acc);border-radius:14px 14px 0 0;padding:0 max(16px,env(safe-area-inset-right)) 0 max(16px,env(safe-area-inset-left))}
+.tkbar{display:flex;justify-content:space-between;align-items:center;width:100%;min-height:48px;background:transparent;border:0;color:var(--acc);font:inherit;font-weight:700;padding:0}
+.tkbody{padding-bottom:14px}
+.tl{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--line)}
+.tl>span:first-child{flex:1;min-width:0}
+.tl input,.tk2 input,.jst input{min-height:44px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:0 10px;font:inherit;width:100%}
+.tl input{width:88px}
+.tl .x{min-width:44px;min-height:44px;border:0;background:transparent;color:var(--mut);font-size:22px}
+.tk2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}
+.tk2 label,.jst{display:flex;flex-direction:column;gap:4px;color:var(--mut);font-size:12.5px}
+.tk3{display:flex;gap:8px;margin-top:8px}
+.tk3 .more{margin:0}
+.more.pri{background:var(--acc);color:#1a1205;border-color:var(--acc)}
+.more[disabled]{opacity:.5}
+body.tk{padding-bottom:calc(240px + env(safe-area-inset-bottom))}
+.jst{margin:14px 0 4px}
+.bet{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;flex-direction:column;gap:4px}
+.bh{display:flex;justify-content:space-between;gap:8px;font-size:14px}
+.del{align-self:flex-start;margin-top:4px;min-height:44px;background:transparent;border:0;color:var(--mut);font:inherit;font-size:12.5px;padding:0}
+.picks{padding:0 14px}
+.pk{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 0}
+.pk+.pk{border-top:1px solid var(--line)}
+.pk span{display:block;color:var(--mut);font-size:12px;font-weight:400}
+.pk>div:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.keybox{display:flex;gap:8px}
+.keybox input{flex:1;min-width:0;min-height:44px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:0 12px;font:inherit}
+.keybox .more{width:auto;margin:0;padding:0 16px}
+/* barre du bas */
+nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top:1px solid var(--line);
+  padding:8px max(12px,env(safe-area-inset-right)) max(68px,calc(14px + env(safe-area-inset-bottom))) max(12px,env(safe-area-inset-left))}
+.tabs-in{display:flex;gap:4px;max-width:640px;margin:0 auto}
+.tab{flex:1;min-height:56px;border:0;background:transparent;color:var(--mut);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:12px;font-weight:600;padding:0}
+.tab .chip{display:flex;align-items:center;justify-content:center;width:52px;height:30px;border-radius:15px}
+.tab.on{color:var(--acc)}
+.tab.on .chip{background:var(--line)}
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>NBA Predict</h1>
-    <button id="refresh" type="button">Actualiser</button>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1 id="heading">Matchs à venir</h1>
+      <div id="status" role="status">Chargement…</div>
+    </div>
+    <button id="refresh" class="icon" type="button" aria-label="Actualiser les données"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
   </header>
-  <div id="status" role="status">Chargement…</div>
 
-  <h2>Prochains matchs</h2>
-  <div id="games"><div class="empty">Aucune donnée pour l'instant.</div></div>
+  <section id="tab-played" hidden>
+    <div class="filters">
+      <select id="fTeam" aria-label="Équipe"></select>
+      <select id="fOpp" aria-label="Adversaire"></select>
+      <select id="fSeason" aria-label="Saison"></select>
+    </div>
+    <div id="h2h" class="stats"></div>
+    <div id="played"></div>
+    <button id="more" class="more" type="button" hidden>Voir plus de matchs</button>
+    <p class="note">Touche un match pour voir le détail : quart-temps, total de points et ligne. Choisis une équipe puis un adversaire pour un face-à-face.</p>
+  </section>
 
-  <h2>Fiabilité du modèle</h2>
-  <div id="stats" class="stats"></div>
+  <section id="tab-up">
+    <div class="seg" id="upFilter" role="group" aria-label="Filtrer les matchs"><button type="button" data-min="0" aria-pressed="true">Tous les matchs</button><button type="button" data-min="0.7" aria-pressed="false">Confiance ≥ 70 %</button></div>
+    <div id="picks"></div>
+    <div id="games"><div class="empty">Aucune donnée pour l'instant.</div></div>
+    <p class="note">Le total prévu vient du modèle pour chaque match. Le verdict Over/Under apparaît dès qu'ESPN publie sa ligne, en général peu avant le match.</p>
+  </section>
 
-  <details>
-    <summary>Classement Elo</summary>
+  <section id="tab-journal" hidden>
+    <div id="jstats" class="stats"></div>
+    <label class="jst">Bankroll de départ (€)<input id="jstart" type="number" inputmode="decimal" step="1" min="0" value="100"></label>
+    <div id="jopen"></div>
+    <div id="jhist"></div>
+    <p class="note">Les paris sont suivis et gagnés ou perdus automatiquement avec les résultats ESPN. Tout reste enregistré sur ce téléphone.</p>
+  </section>
+
+  <section id="tab-model" hidden>
+    <h2>Fiabilité du modèle</h2>
+    <div id="stats" class="stats"></div>
+    <h2>Réglage automatique</h2>
+    <div id="tune" class="stats"></div>
+    <h2>Paris sûrs : test sur le passé</h2>
+    <div id="safe" class="stats"></div>
+    <h2>Joueurs et absences</h2>
+    <div id="players" class="stats"></div>
+    <h2>Fiabilité des pourcentages</h2>
+    <div class="scroll"><table id="calib"></table></div>
+    <h2>Total de points (Over/Under)</h2>
+    <div id="totstats" class="stats"></div>
+    <h2>Classement Elo</h2>
     <div class="scroll"><table id="rank"></table></div>
-  </details>
+    <h2>Cotes Betclic</h2>
+    <div class="keybox"><input id="oddsKey" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Clé The Odds API" aria-label="Clé The Odds API"><button id="saveKey" class="more" type="button">Enregistrer</button></div>
+    <p class="note" id="oddsInfo"></p>
+    <p class="note" id="modelnote"></p>
+  </section>
+</div>
 
-  <p class="note">Modèle v1 : Elo avec avantage du terrain, marge de victoire et fatigue (match la veille). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.</p>
-</main>
+<div id="ticket" class="ticket" hidden></div>
+
+<nav class="tabs" aria-label="Navigation">
+  <div class="tabs-in">
+    <button type="button" class="tab" data-tab="played" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg></span><span>Joués</span></button>
+    <button type="button" class="tab" data-tab="up" aria-pressed="true"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M8 3v4M16 3v4M3.5 10h17"/></svg></span><span>À venir</span></button>
+    <button type="button" class="tab" data-tab="journal" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4z"/><path d="M9 9h6M9 13h6"/></svg></span><span>Journal</span></button>
+    <button type="button" class="tab" data-tab="model" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6"/></svg></span><span>Modèle</span></button>
+  </div>
+</nav>
 <script src="app.js"></script>
 </body>
 </html>

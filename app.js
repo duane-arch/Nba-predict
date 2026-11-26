@@ -1,9 +1,12 @@
 'use strict';
-// NBA Predict v1 : données ESPN (scoreboard) -> Elo -> prédictions.
+// NBA Predict v2.0 : données ESPN (scoreboard) -> Elo + total de points -> prédictions.
 const API = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard';
-const SEASON_START = '20251021';   // début de la base d'historique
+const SEASON_START = '20231024';   // début de la base d'historique : 3 saisons complètes + la saison en cours
+const DB_VERSION = 3;              // à changer pour forcer un rechargement complet des données
 const LS_KEY = 'nbaPredict.v1';
-const K = 20, HFA = 100, B2B = 40, PTS = 28;
+const PTS = 28;                                                 // Elo : points d'Elo par point de marge
+const HCA = 1.5, LG0 = 113, LG_PRIOR_N = 300, WARM = 15;        // total de points
+const OU_EDGE = 5;                                              // écart (pts) à partir duquel le verdict Over/Under est mis en avant
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -11,14 +14,23 @@ const pad = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 const parseYmd = (s) => new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8));
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const fr = (x, d = 1) => Number(x).toFixed(d).replace('.', ',');
+const signed = (x, d = 0) => { const v = Number(x).toFixed(d); return (Number(v) >= 0 ? '+' : '-') + v.replace('-', '').replace('.', ','); };
+const T = (id) => db.teams[id] || { ab: '?', n: 'Équipe ' + id };
+const dayLabel = (d) => d.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', year: d.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined });
 
 let db = load();
 function load() {
-  try { const v = JSON.parse(localStorage.getItem(LS_KEY)); if (v && v.games) return v; } catch (e) {}
-  return { games: {}, teams: {}, upcoming: [], updatedAt: null };
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_KEY));
+    if (v && v.games) {
+      if (v.v !== DB_VERSION) { v.days = {}; v.v = DB_VERSION; }   // nouvelle version : on recharge les jours pour récupérer les nouveaux détails
+      return v;
+    }
+  } catch (e) {}
+  return { v: DB_VERSION, games: {}, teams: {}, upcoming: [], updatedAt: null };
 }
 function save() { try { localStorage.setItem(LS_KEY, JSON.stringify(db)); } catch (e) {} }
-
 function setStatus(msg, err) { const s = $('#status'); s.textContent = msg; s.className = err ? 'err' : ''; }
 
 // ---------- Récupération des données ----------
@@ -46,6 +58,9 @@ function parseEvent(ev) {
   if (!h || !a || !h.team || !a.team) return null;
   const type = (ev.status && ev.status.type) || {};
   const o = c.odds && c.odds[0];
+  const lsOf = (x) => (x.linescores || []).map((l) => Number(l.value));
+  const lh = lsOf(h), la = lsOf(a);
+  const okLs = lh.length >= 4 && la.length >= 4 && lh.concat(la).every(Number.isFinite);
   return {
     id: String(ev.id), t: ev.date,
     h: { id: String(h.team.id), ab: h.team.abbreviation, n: h.team.displayName || h.team.name },
@@ -53,30 +68,37 @@ function parseEvent(ev) {
     hs: Number(h.score), as: Number(a.score),
     done: !!type.completed, live: type.state === 'in',
     odds: o ? { details: o.details || '', ou: o.overUnder || null } : null,
+    po: st === 3, ls: okLs ? { a: la, h: lh } : null,
   };
 }
-
 function ingest(events, up) {
   for (const ev of events) {
     const g = parseEvent(ev); if (!g) continue;
     db.teams[g.h.id] = { ab: g.h.ab, n: g.h.n }; db.teams[g.a.id] = { ab: g.a.ab, n: g.a.n };
     if (g.done && Number.isFinite(g.hs) && Number.isFinite(g.as)) {
-      db.games[g.id] = { t: g.t, h: g.h.id, a: g.a.id, hs: g.hs, as: g.as };
+      const rec = { t: g.t, h: g.h.id, a: g.a.id, hs: g.hs, as: g.as };
+      if (g.ls) rec.ls = g.ls;
+      if (g.po) rec.po = 1;
+      if (g.odds && g.odds.details) rec.o = g.odds.details;
+      if (g.odds && Number(g.odds.ou) > 100) rec.ou = Number(g.odds.ou);
+      db.games[g.id] = rec;
     } else if (!g.done) {
       up[g.id] = { id: g.id, t: g.t, h: g.h.id, a: g.a.id, live: g.live, odds: g.odds };
     }
   }
 }
-
-async function refresh() {
-  const btn = $('#refresh'); btn.disabled = true;
+async function refresh(manual) {
+  const btn = $('#refresh'); btn.disabled = true; btn.classList.add('busy');
   try {
     setStatus('Mise à jour des données…');
     db.days = db.days || {};
     const today = new Date();
     const days = [];
-    for (let d = parseYmd(SEASON_START); d <= addDays(today, 3); d = addDays(d, 1)) days.push(ymd(d));
-    const recent = ymd(addDays(today, -3));                 // les 3 derniers jours sont toujours rechargés
+    for (let d = parseYmd(SEASON_START); d <= addDays(today, 3); d = addDays(d, 1)) {
+      const mo = d.getMonth();
+      if (mo < 6 || mo > 8) days.push(ymd(d));                // pas de matchs NBA de juillet à septembre
+    }
+    const recent = ymd(addDays(today, -3));                   // les 3 derniers jours sont toujours rechargés
     const todo = days.filter((d) => d >= recent || !db.days[d]);
     const up = {}; const errors = []; let n = 0;
     await pool(todo, 6, async (d) => {
@@ -85,55 +107,373 @@ async function refresh() {
         if (d < recent) db.days[d] = 1;
       } catch (e) { errors.push(e.message); }
       n++;
+      if (n % 60 === 0) save();                               // on garde la progression si la page est fermée
       if (n % 5 === 0 || n === todo.length) setStatus(`Récupération des matchs… (${n}/${todo.length})`);
     });
     if (errors.length && errors.length === todo.length) throw new Error(errors[0]);
     db.upcoming = Object.values(up).sort((x, y) => (x.t < y.t ? -1 : 1));
     db.updatedAt = new Date().toISOString();
     save();
+    let oddsMsg = '';
+    try { await fetchOdds(manual === true ? 20 * 60e3 : 3 * 3600e3); } catch (e) { oddsMsg = ` · cotes indisponibles (${e.message === 'Failed to fetch' ? 'réseau ou accès bloqué' : e.message})`; }
     render();
     const hh = new Date(db.updatedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    setStatus(`À jour · ${Object.keys(db.games).length} matchs en base · ${hh}` + (errors.length ? ` · ${errors.length} jour(s) en échec` : ''), errors.length > 0);
+    const base = `À jour · ${hh}` + (errors.length ? ` · ${errors.length} jour(s) en échec` : '') + oddsMsg, flag = errors.length > 0 || !!oddsMsg;
+    setStatus(base, flag);
+    await syncPlayers(base, flag);
   } catch (e) {
     save();
     setStatus(`Échec de la mise à jour (${e.message}). Données en cache affichées.`, true);
     render();
-  } finally { btn.disabled = false; }
+  } finally { btn.disabled = false; btn.classList.remove('busy'); }
 }
 
-// ---------- Modèle Elo ----------
+// ---------- Modèle Elo (vainqueur et marge) ----------
 const dayKey = (iso) => new Date(Date.parse(iso) - 6 * 3600e3).toISOString().slice(0, 10); // ~heure US
 const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 864e5);
 const seasonOf = (iso) => { const d = new Date(iso); return d.getUTCMonth() >= 7 ? d.getUTCFullYear() : d.getUTCFullYear() - 1; };
-function fatigue(h, a, day, last) {
-  let adj = 0;
-  if (last[h] && dayDiff(day, last[h]) === 1) adj -= B2B;
-  if (last[a] && dayDiff(day, last[a]) === 1) adj += B2B;
-  return adj;
+// Réglages de départ de l'Elo ; l'appli les ajuste seule sur tes données (voir tuneElo).
+const EBASE = { K: 20, HFA: 100, B2B: 40, R34: 0, REG: 0.25, ABS: 0 };
+const ECAND = { K: [12, 16, 20, 24, 30], HFA: [60, 80, 100, 120], B2B: [0, 20, 40, 60], R34: [0, 15, 30], REG: [0.1, 0.25, 0.4], ABS: [0, 2, 4, 6, 8] };
+const HOLD = 400;                                  // matchs les plus récents gardés de côté pour vérifier que le réglage aide vraiment
+function fatigue(h, a, day, st, prm) {             // pénalité de repos : match la veille, 3e match en 4 soirs
+  const f = (t) => {
+    let x = 0; const l = st.last[t];
+    if (l && dayDiff(day, l) === 1) x += prm.B2B;
+    const hs = st.hist[t];
+    if (hs && hs.filter((d) => { const n = dayDiff(day, d); return n >= 1 && n <= 3; }).length >= 2) x += prm.R34;
+    return x;
+  };
+  return f(a) - f(h);
 }
-function runModel() {
-  const games = Object.values(db.games).sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
-  const elo = {}, cnt = {}, last = {}, log = []; let season = null;
+// ---------- Joueurs : détail des matchs (ESPN summary) et blessures ----------
+const SUMMARY = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=';
+const INJ_URL = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries';
+const BOX_LS = 'nbaPredict.box2', BOX_BATCH = 900;
+const REPL = 5, ROT_MIN = 18, ROT_WIN = 20;                    // production d'un remplaçant ; minutes et fenêtre pour être « dans la rotation »
+const STW = { out: 1, doubtful: 0.75, questionable: 0.4, 'day-to-day': 0.3 };   // part de chance d'être absent selon le statut ESPN
+let boxDb = (() => { try { const v = JSON.parse(localStorage.getItem(BOX_LS)); if (v && v.games) return v; } catch (e) {} return { games: {} }; })();
+try { localStorage.removeItem('nbaPredict.box'); } catch (e) {}   // ancien format (production simple), remplacé par le Game Score
+const saveBox = () => { try { localStorage.setItem(BOX_LS, JSON.stringify(boxDb)); } catch (e) {} };
+async function fetchBox(id) {
+  const r = await fetch(SUMMARY + id);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json(), out = {};
+  for (const t of (j.boxscore && j.boxscore.players) || []) {
+    const st = (t.statistics || [])[0]; if (!st || !t.team) continue;
+    const keys = st.keys || st.names || [], ix = (re) => keys.findIndex((k) => re.test(String(k)));
+    const iMin = ix(/^min/i); if (iMin < 0) continue;
+    const c = { pts: ix(/^points$/i), ast: ix(/^assists$/i), stl: ix(/^steals$/i), blk: ix(/^blocks$/i), tov: ix(/^turnovers$/i), orb: ix(/^offensiverebounds$/i), drb: ix(/^defensiverebounds$/i),
+      reb: ix(/^rebounds$/i), pf: ix(/^fouls$/i), pm: ix(/^plusminus$/i), fg: ix(/^fieldgoalsmade-fieldgoalsattempted$/i), ft: ix(/^freethrowsmade-freethrowsattempted$/i) };
+    const rows = [];
+    for (const a of st.athletes || []) {
+      if (a.didNotPlay || !a.stats || !a.stats.length || !a.athlete) continue;
+      const v = (i) => { const x = i >= 0 ? parseFloat(a.stats[i]) : NaN; return Number.isFinite(x) ? x : 0; };
+      const pair = (i) => { const m = i >= 0 ? String(a.stats[i]).match(/(\d+)\D+(\d+)/) : null; return m ? [+m[1], +m[2]] : [0, 0]; };
+      const min = v(iMin); if (min <= 0) continue;
+      const [fgm, fga] = pair(c.fg), [ftm, fta] = pair(c.ft);
+      const orb = c.orb >= 0 ? v(c.orb) : 0, drb = c.drb >= 0 ? v(c.drb) : Math.max(0, v(c.reb) - orb);
+      // Game Score de Hollinger : un chiffre de production par match (star ≈ 25, joueur de rotation ≈ 10, banc ≈ 3)
+      const gs = v(c.pts) + 0.4 * fgm - 0.7 * fga - 0.4 * (fta - ftm) + 0.7 * orb + 0.3 * drb + v(c.stl) + 0.7 * v(c.ast) + 0.7 * v(c.blk) - 0.4 * v(c.pf) - v(c.tov);
+      rows.push([String(a.athlete.id), Math.round(min), Math.round(gs * 10) / 10, Math.round(v(c.pm))]);
+    }
+    out[String(t.team.id)] = rows;
+  }
+  return out;
+}
+async function fetchInjuries() {
+  const r = await fetch(INJ_URL);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json(), teams = {}; let n = 0;
+  const short = (o) => (o && typeof o === 'object' ? Object.keys(o).slice(0, 12).join(',') : typeof o);
+  const t0 = (j.injuries || [])[0], i0 = t0 && (t0.injuries || [])[0];
+  const dbg = `racine: ${short(j)} | équipes: ${(j.injuries || []).length} | équipe: ${short(t0)} | blessure: ${short(i0)} | joueur: ${i0 && i0.athlete ? JSON.stringify(i0.athlete).replace(/"(https?:[^"]{0,90})[^"]*"/g, '"$1…"').slice(0, 420) : '-'} | statut: ${i0 ? JSON.stringify(i0.status || (i0.type && i0.type.description) || null) : '-'}`;
+  const idOf = (at) => {   // l'identifiant du joueur peut être dans id, uid, guid ou dans le lien de sa fiche
+    if (!at) return '';
+    if (at.id) return String(at.id);
+    const cands = [at.uid, at.guid, at.$ref, at.href, ...(Array.isArray(at.links) ? at.links.map((l) => l && l.href) : [])].filter(Boolean).map(String);
+    for (const c of cands) { const m = c.match(/a:(\d{3,})/) || c.match(/\/id\/(\d{3,})/) || c.match(/athletes\/(\d{3,})/); if (m) return m[1]; }
+    return '';
+  };
+  for (const t of j.injuries || []) {
+    const tid = String(t.id || (t.team && t.team.id) || ''), list = [];
+    for (const it of t.injuries || []) {
+      const at = it.athlete || it, id = idOf(at); if (!id) continue;
+      const st = it.status && typeof it.status === 'object' ? (it.status.name || it.status.description || it.status.type) : it.status;
+      list.push({ id, name: at.displayName || at.fullName || at.shortName || 'Joueur', status: String(st || (it.type && (it.type.description || it.type.name)) || '').toLowerCase() });
+    }
+    if (tid) teams[tid] = list; n += list.length;
+  }
+  db.inj = { at: new Date().toISOString(), teams, n, dbg };
+  save();
+}
+// Pour chaque match joué : valeur des joueurs « de rotation » absents (production moyenne au-dessus d'un remplaçant).
+function playerPass(games) {
+  const pl = {}, tg = {};
   for (const g of games) {
+    const bx = boxDb.games[g.id];
+    if (!bx || !bx[g.h] || !bx[g.a] || bx[g.h].length < 5 || bx[g.a].length < 5) continue;
+    for (const tid of [g.h, g.a]) {
+      const rows = bx[tid], played = new Set(rows.map((r) => r[0])), P = pl[tid] || (pl[tid] = {}), n = tg[tid] || 0;
+      let x = 0, tal = 0;
+      for (const pid in P) {
+        const q = P[pid];
+        if (!(q.c >= 3 && q.m >= ROT_MIN && n - q.last <= ROT_WIN)) continue;     // joueur de rotation
+        if (played.has(pid)) tal += Math.max(0, q.p); else x += Math.max(0, q.p - REPL);
+      }
+      if (tid === g.h) { g.xh = Math.min(x, 90); g.th = tal; } else { g.xa = Math.min(x, 90); g.ta = tal; }
+      for (const r of rows) {
+        const q = P[r[0]];
+        if (!q) P[r[0]] = { m: r[1], p: r[2], c: 1, last: n };
+        else { q.m = 0.85 * q.m + 0.15 * r[1]; q.p = 0.85 * q.p + 0.15 * r[2]; q.c++; q.last = n; }
+      }
+      tg[tid] = n + 1;
+    }
+  }
+  return { pl, tg };
+}
+// Absents annoncés (blessures ESPN) d'une équipe pour un match à venir.
+function missX(M, tid) {
+  const inj = (db.inj && db.inj.teams[tid]) || [], P = M.pl[tid] || {}, n = M.tg[tid] || 0, list = []; let x = 0, tal = 0;
+  const rot = (q) => q && q.c >= 3 && q.m >= ROT_MIN && n - q.last <= ROT_WIN;
+  for (const pid in P) if (rot(P[pid])) tal += Math.max(0, P[pid].p);
+  for (const it of inj) {
+    const w = STW[it.status]; if (!w) continue;
+    const q = P[it.id]; if (!rot(q)) continue;
+    tal -= w * Math.max(0, q.p);
+    const v = Math.max(0, q.p - REPL); if (v <= 0) continue;
+    x += w * v; list.push({ name: it.name, status: it.status, v });
+  }
+  return { x: Math.min(x, 90), list, tal };
+}
+async function syncPlayers(base, flag) {
+  let changed = false, msg = '';
+  try { await fetchInjuries(); changed = true; } catch (e) { msg += ` · blessures indisponibles (${e.message === 'Failed to fetch' ? 'réseau' : e.message})`; }
+  const cur = seasonOf(new Date().toISOString());
+  const todo = Object.entries(db.games).filter(([id, g]) => seasonOf(g.t) >= cur - 1 && !boxDb.games[id]).sort((x, y) => (x[1].t < y[1].t ? 1 : -1)).slice(0, BOX_BATCH);
+  let n = 0, bad = 0;
+  await pool(todo, 6, async ([id]) => {
+    try {
+      const o = await fetchBox(id);
+      if (Object.keys(o).length === 2) boxDb.games[id] = o;
+      else { bad++; if (Date.now() - Date.parse(db.games[id].t) > 3 * 864e5) boxDb.games[id] = {}; }   // pas de détail chez ESPN pour ce match : on ne le redemande plus
+      changed = true;
+    } catch (e) { bad++; }
+    n++;
+    if (n % 100 === 0) saveBox();
+    if (n % 10 === 0 || n === todo.length) setStatus(`Détails des joueurs… (${n}/${todo.length})`);
+  });
+  if (todo.length) saveBox();
+  if (todo.length && bad === todo.length && !Object.values(boxDb.games).some((o) => Object.keys(o).length === 2)) msg += ' · détails des joueurs indisponibles (format ou accès)';
+  if (changed) render();
+  setStatus(base + msg, flag || !!msg);
+}
+
+const eloDiff = (M, h, a, day) => (M.elo[h] ?? 1500) - (M.elo[a] ?? 1500) + M.prm.HFA + fatigue(h, a, day, M.st, M.prm) + M.prm.ABS * (missX(M, a).x - missX(M, h).x);
+const sigm = (x) => 1 / (1 + Math.exp(-x));
+const logit = (p) => Math.log(Math.min(0.999, Math.max(0.001, p)) / (1 - Math.min(0.999, Math.max(0.001, p))));
+function runElo(games, prm, keep) {
+  const elo = {}, cnt = {}, st = { last: {}, hist: {} }, log = [], pred = {}; let season = null;
+  games.forEach((g, i) => {
     const sn = seasonOf(g.t);
     if (season !== null && sn !== season) {
-      for (const k in elo) elo[k] = 1505 + (elo[k] - 1505) * 0.75;
-      for (const k in last) delete last[k];
+      for (const k in elo) elo[k] = 1505 + (elo[k] - 1505) * (1 - prm.REG);
+      st.last = {}; st.hist = {};
     }
     season = sn;
     const eh = elo[g.h] ?? 1500, ea = elo[g.a] ?? 1500, day = dayKey(g.t);
-    const diff = eh - ea + HFA + fatigue(g.h, g.a, day, last);
+    const diff = eh - ea + prm.HFA + fatigue(g.h, g.a, day, st, prm) + prm.ABS * ((g.xa || 0) - (g.xh || 0));
     const p = 1 / (1 + Math.pow(10, -diff / 400));
     const win = g.hs > g.as ? 1 : 0, mov = Math.abs(g.hs - g.as);
-    if ((cnt[g.h] || 0) >= 15 && (cnt[g.a] || 0) >= 15) log.push({ t: g.t, p, win });
+    const warm = (cnt[g.h] || 0) >= 15 && (cnt[g.a] || 0) >= 15;
+    if (keep) pred[g.id] = { p, m: diff / PTS, cold: !warm };
+    if (warm) log.push({ i, t: g.t, p, win });
     const dW = win ? diff : -diff;
     const mult = Math.pow(mov + 3, 0.8) / (7.5 + 0.006 * dW);
-    const delta = K * mult * (win - p);
+    const delta = prm.K * mult * (win - p);
     elo[g.h] = eh + delta; elo[g.a] = ea - delta;
     cnt[g.h] = (cnt[g.h] || 0) + 1; cnt[g.a] = (cnt[g.a] || 0) + 1;
-    last[g.h] = day; last[g.a] = day;
+    for (const t of [g.h, g.a]) { st.last[t] = day; (st.hist[t] = st.hist[t] || []).push(day); if (st.hist[t].length > 4) st.hist[t].shift(); }
+  });
+  return { elo, cnt, st, log, pred };
+}
+const brierOf = (L) => L.length ? L.reduce((s, x) => s + (x.p - x.win) ** 2, 0) / L.length : NaN;
+const accOf = (L) => L.length ? L.filter((x) => (x.p >= 0.5) === (x.win === 1)).length / L.length : NaN;
+// Réglage automatique : on essaie quelques valeurs de chaque paramètre et on garde celles qui donnent le meilleur score de Brier.
+function tuneElo(games) {
+  const prm = { ...EBASE };
+  let best = brierOf(runElo(games, prm, false).log);
+  for (let pass = 0; pass < 2; pass++) for (const k of Object.keys(ECAND)) for (const v of ECAND[k]) {
+    if (v === prm[k]) continue;
+    const b = brierOf(runElo(games, { ...prm, [k]: v }, false).log);
+    if (b < best - 1e-6) { best = b; prm[k] = v; }
   }
-  return { elo, cnt, last, log };
+  return prm;
+}
+// Étalonnage : corrige les pourcentages (trop sûrs ou pas assez) par une régression logistique sur la sortie du modèle.
+function plattFit(L) {
+  let a = 1, b = 0;
+  for (let it = 0; it < 300; it++) {
+    let ga = 0, gb = 0;
+    for (const x of L) { const z = logit(x.p), e = sigm(a * z + b) - x.win; ga += e * z; gb += e; }
+    a -= 0.5 * ga / L.length; b -= 0.5 * gb / L.length;
+  }
+  return (p) => sigm(a * logit(p) + b);
+}
+
+// ---------- Modèle du total de points (Over/Under) ----------
+// Chaque équipe a une attaque et une défense (écart à la moyenne de la ligue, ajusté de l'adversaire et du terrain),
+// moyennées avec une mémoire qui décroît. Les 2 réglages (mémoire, prudence) sont choisis automatiquement
+// sur tes propres données : le meilleur est celui qui se trompe le moins sur les totaux déjà joués.
+function runTotals(games, lam, shrink, keep) {
+  const tm = {}, cnt = {};
+  let lgSum = 0, lgN = 0, prior = LG0, season = null, errSum = 0, errN = 0;
+  const pred = {}, log = [];
+  const rate = (id) => { const x = tm[id] || (tm[id] = { off: 0, def: 0, n: 0 }); return { o: x.off / (x.n + shrink), d: x.def / (x.n + shrink) }; };
+  for (const g of games) {
+    const sn = seasonOf(g.t);
+    if (season !== null && sn !== season) {
+      prior = lgN ? lgSum / lgN : prior;                       // moyenne de la saison écoulée
+      lgSum = 0; lgN = 0;
+      for (const id in tm) { tm[id].off *= 0.5; tm[id].def *= 0.5; tm[id].n *= 0.5; }
+    }
+    season = sn;
+    const lg = (lgSum + prior * LG_PRIOR_N) / (lgN + LG_PRIOR_N);
+    const rh = rate(g.h), ra = rate(g.a);
+    const ph = lg + rh.o + ra.d + HCA, pa = lg + ra.o + rh.d - HCA;
+    const tot = ph + pa, act = g.hs + g.as;
+    const warm = (cnt[g.h] || 0) >= WARM && (cnt[g.a] || 0) >= WARM;
+    if (warm) { errSum += Math.abs(tot - act); errN++; }
+    if (keep) {
+      pred[g.id] = { tot, ph, pa, cold: !warm };
+      if (warm) log.push({ tot, act, ou: g.ou || null, lg });
+    }
+    const H = tm[g.h], A = tm[g.a];
+    H.off = lam * H.off + (g.hs - lg - HCA - ra.d);
+    H.def = lam * H.def + (g.as - lg + HCA - ra.o);
+    A.off = lam * A.off + (g.as - lg + HCA - rh.d);
+    A.def = lam * A.def + (g.hs - lg - HCA - rh.o);
+    H.n = lam * H.n + 1; A.n = lam * A.n + 1;
+    lgSum += act; lgN += 2;
+    cnt[g.h] = (cnt[g.h] || 0) + 1; cnt[g.a] = (cnt[g.a] || 0) + 1;
+  }
+  const lgNow = (lgSum + prior * LG_PRIOR_N) / (lgN + LG_PRIOR_N);
+  return { mae: errN ? errSum / errN : null, n: errN, rate, lg: lgNow, pred, log };
+}
+function fitTotals(games) {
+  let best = null;
+  for (const lam of [0.88, 0.92, 0.95]) for (const k of [2, 4, 8]) {
+    const r = runTotals(games, lam, k, false);
+    if (r.mae !== null && (!best || r.mae < best.mae)) best = { lam, k, mae: r.mae };
+  }
+  return best || { lam: 0.92, k: 4, mae: null };
+}
+function predictTot(M, h, a) {
+  const t = M.tot, rh = t.rate(h), ra = t.rate(a);
+  const ph = t.lg + rh.o + ra.d + HCA, pa = t.lg + ra.o + rh.d - HCA;
+  return { tot: ph + pa, ph, pa };
+}
+
+// ---------- Combinaison de signaux (Elo + attaque-défense + forme + repos) ----------
+const formVal = (mg, t) => { const x = mg[t]; return x && x.length >= 5 ? x.reduce((s, v) => s + v, 0) / x.length : 0; };   // marge moyenne sur les 10 derniers matchs
+const restOf = (lastD, t, day) => { const l = lastD[t]; if (!l) return 3; const n = dayDiff(day, l) - 1; return n > 10 ? 3 : Math.max(0, Math.min(4, n)); };
+function formPass(games) {
+  const mg = {}, lastD = {}; let season = null;
+  for (const g of games) {
+    const sn = seasonOf(g.t), day = dayKey(g.t);
+    if (season !== null && sn !== season) for (const k in mg) mg[k] = [];
+    season = sn;
+    g.fm = formVal(mg, g.h) - formVal(mg, g.a);
+    g.rd = restOf(lastD, g.h, day) - restOf(lastD, g.a, day);
+    for (const [t, m] of [[g.h, g.hs - g.as], [g.a, g.as - g.hs]]) { (mg[t] = mg[t] || []).push(m); if (mg[t].length > 10) mg[t].shift(); lastD[t] = day; }
+  }
+  return { mg, lastD };
+}
+const stkRow = (pRaw, mt, fm, rd, td) => [1, logit(pRaw), mt / 10, fm / 10, rd / 3, td / 20];
+function logitFit(X, y) {
+  const D = X[0].length, w = [0, 1, ...Array(D - 2).fill(0)];
+  for (let it = 0; it < 500; it++) {
+    const g = Array(D).fill(0);
+    for (let r = 0; r < X.length; r++) {
+      let z = 0; for (let k = 0; k < D; k++) z += w[k] * X[r][k];
+      const e = sigm(z) - y[r]; for (let k = 0; k < D; k++) g[k] += e * X[r][k];
+    }
+    for (let k = 0; k < D; k++) w[k] -= 0.6 * (g[k] / X.length + (k > 0 ? 0.001 * w[k] : 0));
+  }
+  return w;
+}
+const stkP = (w, row) => sigm(row.reduce((s, x, k) => s + w[k] * x, 0));
+
+function runModel() {
+  const games = Object.entries(db.games).map(([id, g]) => ({ id, ...g })).sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
+  const PP = playerPass(games), nBox = games.filter((g) => g.xh !== undefined).length;
+  const cut = games.length > 1200 ? games.length - HOLD : 0;
+  let prm = { ...EBASE }, evalPrm = prm, tune = null, calib = null, cal = (p) => p;
+  if (cut) {   // 1) on règle sur le passé, 2) on vérifie sur les derniers matchs que le modèle n'a pas vus
+    const tuned = tuneElo(games.slice(0, cut));
+    const hb = runElo(games, EBASE, false).log.filter((x) => x.i >= cut), ht = runElo(games, tuned, false).log.filter((x) => x.i >= cut);
+    const used = brierOf(ht) < brierOf(hb);
+    tune = { n: hb.length, bBase: brierOf(hb), bTuned: brierOf(ht), aBase: accOf(hb), aTuned: accOf(ht), used };
+    if (used) { evalPrm = tuned; prm = tuneElo(games); }
+  }
+  const R = runElo(games, prm, true);
+  if (cut) {
+    const E = runElo(games, evalPrm, false).log;
+    const tr = E.filter((x) => x.i < cut), te = E.filter((x) => x.i >= cut);
+    const f = plattFit(tr), mapped = te.map((x) => ({ ...x, p: f(x.p) }));
+    const used = brierOf(mapped) < brierOf(te);
+    calib = { bRaw: brierOf(te), bCal: brierOf(mapped), used };
+    if (used) cal = plattFit(R.log);
+  }
+  const totPrm = fitTotals(games);
+  const tot = runTotals(games, totPrm.lam, totPrm.k, true);
+  const FP = formPass(games);
+  const rowOf = (i) => { const g = games[i], tp = tot.pred[g.id]; return stkRow(R.pred[g.id].p, tp ? tp.ph - tp.pa : 0, g.fm || 0, g.rd || 0, g.th !== undefined && g.ta !== undefined ? g.th - g.ta : 0); };
+  let stack = null, w = null;
+  if (cut) {   // la combinaison est apprise sur le passé, puis comparée à l'Elo étalonné seul sur les derniers matchs
+    const trI = R.log.filter((x) => x.i < cut), teI = R.log.filter((x) => x.i >= cut);
+    const wTr = logitFit(trI.map((x) => rowOf(x.i)), trI.map((x) => x.win)), f0 = plattFit(trI);
+    const S = teI.map((x) => ({ p: stkP(wTr, rowOf(x.i)), win: x.win })), C = teI.map((x) => ({ p: f0(x.p), win: x.win }));
+    stack = { bS: brierOf(S), bC: brierOf(C), aS: accOf(S), aC: accOf(C), used: brierOf(S) < brierOf(C) - 0.0015 };
+    if (stack.used) w = logitFit(R.log.map((x) => rowOf(x.i)), R.log.map((x) => x.win));
+  }
+  const pOf = (i) => (w ? stkP(w, rowOf(i)) : cal(R.pred[games[i].id].p));
+  const log = R.log.map((x) => ({ ...x, p: pOf(x.i) }));
+  games.forEach((g, i) => { R.pred[g.id].p = pOf(i); });
+  let absT = null;
+  if (cut && prm.ABS > 0) {
+    const w = brierOf(runElo(games, prm, false).log.filter((x) => x.i >= cut)), w0 = brierOf(runElo(games, { ...prm, ABS: 0 }, false).log.filter((x) => x.i >= cut));
+    absT = { w, w0 };
+  }
+  const warmG = [];
+  games.forEach((g, i) => { const pr = R.pred[g.id], tp = tot.pred[g.id]; if (pr && !pr.cold && tp && !tp.cold) warmG.push({ g, i, pr, tp }); });
+  let sT = 0, sM = 0;
+  for (const x of warmG) { sT += (x.tp.tot - (x.g.hs + x.g.as)) ** 2; sM += (x.pr.m - (x.g.hs - x.g.as)) ** 2; }
+  const sigT = warmG.length > 50 ? Math.sqrt(sT / warmG.length) : 18, sigM = warmG.length > 50 ? Math.sqrt(sM / warmG.length) : 12;
+  const safe = { win: [0, 0, 0], over: [0, 0, 0], under: [0, 0, 0], hcp: [0, 0, 0] };   // [matchs, réussis, somme des probabilités annoncées]
+  for (const x of warmG) {
+    const { g, pr, tp } = x, act = g.hs + g.as, ph = pr.p;
+    for (const b of safeBets({ ab: 'H' }, { ab: 'A' }, ph, pr.m, tp.tot, sigT, sigM)) {
+      let hit;
+      if (b.kind === 'win') hit = (g.hs > g.as) === (ph >= 0.5);
+      else if (b.kind === 'over') hit = act > b.L;
+      else if (b.kind === 'under') hit = act < b.L;
+      else hit = (b.fav === 'h' ? g.hs - g.as : g.as - g.hs) + b.L > 0;
+      const s = safe[b.kind]; s[0]++; s[1] += hit ? 1 : 0; s[2] += b.p;
+    }
+  }
+  let cMT = 0, vM = 0, vT = 0;
+  for (const x of warmG) { const rm = (x.g.hs - x.g.as) - x.pr.m, rt = (x.g.hs + x.g.as) - x.tp.tot; cMT += rm * rt; vM += rm * rm; vT += rt * rt; }
+  const rho = warmG.length > 50 && vM > 0 && vT > 0 ? Math.max(-0.5, Math.min(0.5, cMT / Math.sqrt(vM * vT))) : 0;
+  const M = { sigT, sigM, safe, rho, elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
+  M.winP = (h, a, day) => {   // probabilité que le domicile gagne un match à venir
+    const raw = 1 / (1 + Math.pow(10, -eloDiff(M, h, a, day) / 400));
+    if (!w) return cal(raw);
+    const pt = predictTot(M, h, a);
+    const mh = missX(M, h), ma = missX(M, a);
+    return stkP(w, stkRow(raw, pt.ph - pt.pa, formVal(FP.mg, h) - formVal(FP.mg, a), restOf(FP.lastD, h, day) - restOf(FP.lastD, a, day), mh.tal > 0 && ma.tal > 0 ? mh.tal - ma.tal : 0));
+  };
+  return M;
 }
 function parseSpread(details, hAb, aAb) {           // ex. "BOS -5.5" -> marge attendue du domicile selon la ligne
   if (!details) return null;
@@ -145,66 +485,528 @@ function parseSpread(details, hAb, aAb) {           // ex. "BOS -5.5" -> marge a
   if (m[1] === aAb) return v;
   return null;
 }
+// Ligne ESPN à la façon des parieurs : le favori porte le signe moins.
+function lineTxt(s, H, A) {
+  if (s === 0) return "match nul (pick'em)";
+  return `${s > 0 ? H.ab : A.ab} -${fr(Math.abs(s))} (favori)`;
+}
+const winTxt = (m, H, A, d = 1) => `${m >= 0 ? H.ab : A.ab} +${fr(Math.abs(m), d)}`;   // « BOS +5,5 » : BOS gagne de 5,5
 
-// ---------- Affichage ----------
-function render() {
-  const M = runModel();
-  const T = (id) => db.teams[id] || { ab: '?', n: 'Équipe ' + id };
-  // matchs à venir
-  const box = $('#games');
-  const now = Date.now();
-  const list = db.upcoming.filter((g) => g.live || Date.parse(g.t) > now - 3 * 3600e3);
-  if (!list.length) box.innerHTML = '<div class="empty">Aucun match à venir trouvé.</div>';
-  else box.innerHTML = list.map((g) => {
-    const day = dayKey(g.t);
-    const eh = M.elo[g.h] ?? 1500, ea = M.elo[g.a] ?? 1500;
-    const diff = eh - ea + HFA + fatigue(g.h, g.a, day, M.last);
-    const ph = 1 / (1 + Math.pow(10, -diff / 400)), pa = 1 - ph, margin = diff / PTS;
-    const H = T(g.h), A = T(g.a);
-    const when = new Date(g.t).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-    const spread = g.odds ? parseSpread(g.odds.details, H.ab, A.ab) : null;
-    let line = `Marge modèle : <b>${esc(H.ab)} ${margin >= 0 ? '+' : ''}${margin.toFixed(1)}</b>`;
-    if (spread !== null) {
-      const gap = margin - spread;
-      const fav = gap >= 0 ? H.ab : A.ab;
-      line += ` · Ligne : <b>${esc(H.ab)} ${spread >= 0 ? '+' : ''}${spread.toFixed(1)}</b>`
-        + ` · <span class="${Math.abs(gap) >= 3 ? 'pick' : ''}">Écart ${Math.abs(gap).toFixed(1)} pts (${esc(fav)})</span>`;
-    } else line += ' · Pas de cote disponible';
-    if (g.odds && g.odds.ou) line += ` · O/U ${esc(g.odds.ou)}`;
-    return `<div class="card">
-      <div class="meta"><span>${esc(when)}</span>${g.live ? '<span class="live">EN COURS</span>' : ''}</div>
-      <div class="teams"><span>${esc(A.n)}</span><span class="at">@</span><span>${esc(H.n)}</span></div>
-      <div class="bar"><i class="a" style="width:${(pa * 100).toFixed(1)}%"></i><i class="h" style="width:${(ph * 100).toFixed(1)}%"></i></div>
-      <div class="probs"><b>${esc(A.ab)} ${(pa * 100).toFixed(0)}%</b><b>${esc(H.ab)} ${(ph * 100).toFixed(0)}%</b></div>
-      <div class="line">${line}</div></div>`;
-  }).join('');
+// ---------- Cotes Betclic (The Odds API, clé gratuite saisie dans l'appli) ----------
+const ODDS_URL = 'https://api.the-odds-api.com/v4/sports/basketball_nba/odds/';
+const KEY_LS = 'nbaPredict.oddsKey';
+const SIG_M = 12, EV_MIN = 0.03, EV_PICK = 0.05, EV_SUSPECT = 0.15;   // écart-type d'une marge NBA ; seuils de valeur
+const getKey = () => { try { return localStorage.getItem(KEY_LS) || ''; } catch (e) { return ''; } };
+const nick = (n) => String(n).toLowerCase().replace(/[^a-z0-9 ]/g, '').trim().split(/\s+/).pop();
+const Phi = (z) => {                                // loi normale : probabilité cumulée
+  const t = 1 / (1 + 0.2316419 * Math.abs(z)), d = 0.3989423 * Math.exp(-z * z / 2);
+  const q = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return z > 0 ? 1 - q : q;
+};
+async function fetchOdds(maxAge) {
+  const key = getKey(); if (!key) return;
+  if (db.odds && Date.now() - Date.parse(db.odds.at) < maxAge) return;
+  const r = await fetch(`${ODDS_URL}?apiKey=${encodeURIComponent(key)}&bookmakers=betclic_fr&markets=h2h,spreads,totals&oddsFormat=decimal&dateFormat=iso`);
+  if (!r.ok) throw new Error(r.status === 401 ? 'clé refusée' : r.status === 429 ? 'quota de la clé atteint' : 'HTTP ' + r.status);
+  const left = r.headers.get('x-requests-remaining');
+  const items = [];
+  for (const ev of await r.json()) {
+    const bk = (ev.bookmakers || []).find((b) => b.key === 'betclic_fr'); if (!bk) continue;
+    const it = { t: ev.commence_time, h: nick(ev.home_team), a: nick(ev.away_team) };
+    for (const m of bk.markets || []) {
+      const out = m.outcomes || [];
+      if (m.key === 'h2h') {
+        const o = (n) => (out.find((x) => nick(x.name) === n) || {}).price;
+        if (o(it.h) && o(it.a)) it.ml = { h: o(it.h), a: o(it.a) };
+      } else if (m.key === 'spreads') {
+        const h = out.find((x) => nick(x.name) === it.h), w = out.find((x) => nick(x.name) === it.a);
+        if (h && w) it.sp = { pt: h.point, h: h.price, a: w.price };
+      } else if (m.key === 'totals') {
+        const ov = out.find((x) => x.name === 'Over'), un = out.find((x) => x.name === 'Under');
+        if (ov && un) it.tot = { pt: ov.point, o: ov.price, u: un.price };
+      }
+    }
+    items.push(it);
+  }
+  db.odds = { at: new Date().toISOString(), items, left: left === null ? null : Number(left) };
+  save();
+}
+function findOdds(g) {
+  if (!db.odds) return null;
+  const h = nick(T(g.h).n), a = nick(T(g.a).n);
+  return db.odds.items.find((x) => x.h === h && x.a === a && Math.abs(Date.parse(x.t) - Date.parse(g.t)) < 12 * 3600e3) || null;
+}
+// Cotes Betclic d'un match + valeur (probabilité du modèle × cote − 1) de chaque pari possible.
+function oddsBlock(g, M, ctx) {
+  const o = findOdds(g); if (!o) return { html: '', bets: [] };
+  const H = T(g.h), A = T(g.a), bets = [], parts = [];
+  const sigT = M.sigT || (M.tot.mae || 14) * 1.2533;
+  if (o.ml) {
+    parts.push(`${esc(A.ab)} <b>${fr(o.ml.a, 2)}</b> · ${esc(H.ab)} <b>${fr(o.ml.h, 2)}</b>`);
+    bets.push({ label: `${A.ab} gagne`, p: ctx.pa, odds: o.ml.a }, { label: `${H.ab} gagne`, p: ctx.ph, odds: o.ml.h });
+  }
+  if (o.sp) {
+    const pc = Phi((ctx.margin + o.sp.pt) / (M.sigM || SIG_M));
+    const f = (ab, pt) => `${ab} ${pt > 0 ? '+' : '-'}${fr(Math.abs(pt))}`;
+    parts.push(`Handicap ${esc(f(H.ab, o.sp.pt))} (${fr(o.sp.h, 2)}) / ${esc(f(A.ab, -o.sp.pt))} (${fr(o.sp.a, 2)})`);
+    bets.push({ label: f(H.ab, o.sp.pt), p: pc, odds: o.sp.h }, { label: f(A.ab, -o.sp.pt), p: 1 - pc, odds: o.sp.a });
+  }
+  if (o.tot) {
+    const po = 1 - Phi((o.tot.pt - ctx.tot) / sigT);
+    parts.push(`Total ${fr(o.tot.pt)} : Over <b>${fr(o.tot.o, 2)}</b> · Under <b>${fr(o.tot.u, 2)}</b>`);
+    bets.push({ label: `Over ${fr(o.tot.pt)}`, p: po, odds: o.tot.o }, { label: `Under ${fr(o.tot.pt)}`, p: 1 - po, odds: o.tot.u });
+  }
+  for (const b of bets) b.ev = b.p * b.odds - 1;
+  const good = bets.filter((b) => b.ev >= EV_MIN).sort((x, y) => y.ev - x.ev);
+  let html = parts.map((x) => `<div class="line">Betclic · ${x}</div>`).join('');
+  if (good.length) html += `<div class="line">Valeur : ${good.slice(0, 2).map((b) => `<b class="pick">${esc(b.label)} @ ${fr(b.odds, 2)} (${signed(b.ev * 100)} %)</b>`).join(' · ')}</div>`;
+  return { html, bets };
+}
 
-  // fiabilité
-  const L = M.log; const n = L.length;
+// ---------- Paris les plus sûrs : pour chaque match, les lignes où le modèle donne environ 80 % ----------
+const Z80 = 0.8416, SAFE_WIN = 0.7;
+function safeBets(H, A, ph, margin, tot, sigT, sigM) {
+  const out = [], pa = 1 - ph;
+  if (Math.max(ph, pa) >= SAFE_WIN) out.push({ kind: 'win', side: ph >= pa ? 'h' : 'a', label: `${ph >= pa ? H.ab : A.ab} gagne`, p: Math.max(ph, pa) });
+  const L = Math.floor((tot - Z80 * sigT) / 5) * 5, U = Math.ceil((tot + Z80 * sigT) / 5) * 5;
+  out.push({ kind: 'over', label: `Over ${L}`, L, p: 1 - Phi((L - tot) / sigT) }, { kind: 'under', label: `Under ${U}`, L: U, p: Phi((U - tot) / sigT) });
+  const mu = Math.abs(margin), hl = Math.ceil((Z80 * sigM - mu) * 2) / 2, fav = margin >= 0 ? 'h' : 'a';
+  out.push({ kind: 'hcp', fav, side: fav, L: hl, label: `${fav === 'h' ? H.ab : A.ab} ${hl >= 0 ? '+' : '-'}${fr(Math.abs(hl))}`, p: Phi((mu + hl) / sigM) });
+  return out;
+}
+// ---------- Affichage : onglet À venir ----------
+function upCard(g, M, picks) {
+  const H = T(g.h), A = T(g.a), day = dayKey(g.t);
+  const diff = eloDiff(M, g.h, g.a, day);
+  const ph = M.winP(g.h, g.a, day), pa = 1 - ph, margin = diff / PTS;
+  const time = new Date(g.t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  const spread = g.odds ? parseSpread(g.odds.details, H.ab, A.ab) : null;
+  let tag = '', tagCls = '', l2 = 'Pas de cote disponible';
+  if (spread !== null) {
+    const gap = margin - spread;
+    tag = `Écart ${fr(Math.abs(gap))} pts pour ${gap >= 0 ? H.ab : A.ab}`; tagCls = Math.abs(gap) >= 3 ? 'pick' : '';
+    l2 = `Ligne ESPN : <b>${esc(lineTxt(spread, H, A))}</b>`;
+  }
+  const pt = predictTot(M, g.h, g.a), ou = g.odds && Number(g.odds.ou) > 100 ? Number(g.odds.ou) : null;
+  let l3 = `Total prévu : <b>${fr(pt.tot)} pts</b>`;
+  if (ou) {
+    const d = pt.tot - ou;
+    l3 += ` · O/U ESPN ${fr(ou)} → <b class="${Math.abs(d) >= OU_EDGE ? 'pick' : ''}">${d >= 0 ? 'Over' : 'Under'} (${signed(d, 1)})</b>`;
+  } else l3 += ' · pas de ligne O/U pour l\'instant';
+  const mh = missX(M, g.h), ma = missX(M, g.a);
+  const abTxt = (m, ab) => m.list.length ? `${esc(ab)} : ${m.list.map((p) => `${esc(p.name)} (${esc(p.status)})`).join(', ')}` : '';
+  const ab = [abTxt(ma, A.ab), abTxt(mh, H.ab)].filter(Boolean);
+  const abEff = M.prm.ABS * (ma.x - mh.x) / PTS;
+  const abLine = ab.length ? `<div class="line">Absents importants · ${ab.join(' · ')}${M.prm.ABS > 0 ? ` → <b>${abEff >= 0 ? esc(H.ab) : esc(A.ab)} ${signed(Math.abs(abEff), 1)} pts</b>` : ''}</div>` : '';
+  const sb = safeBets(H, A, ph, margin, pt.tot, M.sigT, M.sigM);
+  ctxById[g.id] = { H, A, ph, margin, tot: pt.tot, t: g.t };
+  const chip = (b) => { const line = b.kind === 'win' ? '' : b.L; const on = ticket.legs.some((l) => l.gid === g.id && l.type === (b.kind === 'win' ? 'win' : b.kind) && (b.kind === 'over' || b.kind === 'under' || l.side === b.side)); return `<button type="button" class="chip" aria-pressed="${on}" data-gid="${esc(g.id)}" data-t="${b.kind}" data-s="${b.side || ''}" data-l="${line}">${esc(b.label)} · ${(b.p * 100).toFixed(0)} %</button>`; };
+  const sbLine = `<div class="line">Paris les plus sûrs · touche pour ajouter au ticket</div><div class="chips">${sb.map(chip).join('')}</div>`;
+  const bt = oddsBlock(g, M, { ph, pa, margin, tot: pt.tot });
+  if (picks) for (const b of bt.bets) picks.push({ ...b, g, time });
+  return `<div class="card">
+    <div class="meta"><span>${esc(time)}${g.live ? ' · <span class="live">EN COURS</span>' : ''}</span><span class="${tagCls}">${esc(tag)}</span></div>
+    <div class="teams"><span>${esc(A.n)}</span><span class="at">@</span><span>${esc(H.n)}</span></div>
+    <div class="bar"><i class="a" style="width:${(pa * 100).toFixed(1)}%"></i><i class="h" style="width:${(ph * 100).toFixed(1)}%"></i></div>
+    <div class="probs"><span>${esc(A.ab)} ${(pa * 100).toFixed(0)}%</span><span>${esc(H.ab)} ${(ph * 100).toFixed(0)}%</span></div>
+    <div class="line">Marge modèle : <b>${esc(winTxt(margin, H, A))}</b></div>
+    <div class="line">${l2}</div>
+    <div class="line">${l3}</div>${abLine}${sbLine}${bt.html}</div>`;
+}
+function renderUp(M) {
+  const box = $('#games'), now = Date.now();
+  let list = db.upcoming.filter((g) => g.live || Date.parse(g.t) > now - 3 * 3600e3);
+  if (view.upMin) list = list.filter((g) => { const p = M.winP(g.h, g.a, dayKey(g.t)); return Math.max(p, 1 - p) >= view.upMin; });
+  if (!list.length) { box.innerHTML = `<div class="empty">${view.upMin ? 'Aucun match avec une confiance assez haute pour le moment.' : 'Aucun match à venir trouvé.'}</div>`; $('#picks').innerHTML = ''; return; }
+  let html = '', cur = '';
+  const picks = [];
+  for (const g of list) {
+    const d = new Date(g.t), key = ymd(d);
+    if (key !== cur) { cur = key; html += `<div class="day">${esc(dayLabel(d))}</div>`; }
+    html += upCard(g, M, picks);
+  }
+  box.innerHTML = html;
+  const top = picks.filter((b) => b.ev >= EV_PICK).sort((x, y) => y.ev - x.ev).slice(0, 5);
+  $('#picks').innerHTML = top.length
+    ? `<h2>Paris à valeur (Betclic)</h2><div class="grp picks">` + top.map((b) => `<div class="pk"><div><b>${esc(b.label)}</b> @ ${fr(b.odds, 2)}<span>${esc(T(b.g.a).ab)} @ ${esc(T(b.g.h).ab)} · ${esc(b.time)}</span></div><div class="${b.ev >= EV_SUSPECT ? 'ko' : 'ok'}">${signed(b.ev * 100)} %${b.ev >= EV_SUSPECT ? '<span>à vérifier</span>' : ''}</div></div>`).join('') + `</div><p class="note">Valeur = probabilité du modèle × cote − 1. Un écart très grand vient souvent d'une info que le modèle n'a pas (blessure, repos) : vérifie avant de miser.</p>`
+    : '';
+}
+
+// ---------- Affichage : onglet Modèle ----------
+function renderModel(M) {
+  const L = M.log, n = L.length;
+  const tile = ([b, s]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(s)}</span></div>`;
   if (n) {
     const acc = L.filter((x) => (x.p >= 0.5) === (x.win === 1)).length / n;
     const brier = L.reduce((s, x) => s + (x.p - x.win) ** 2, 0) / n;
     const homeRate = L.filter((x) => x.win === 1).length / n;
-    const last100 = L.slice(-100); const acc100 = last100.filter((x) => (x.p >= 0.5) === (x.win === 1)).length / last100.length;
+    const l100 = L.slice(-100), acc100 = l100.filter((x) => (x.p >= 0.5) === (x.win === 1)).length / l100.length;
     $('#stats').innerHTML = [
-      [(acc * 100).toFixed(1) + ' %', `Victoires bien prédites (${n} matchs)`],
-      [(acc100 * 100).toFixed(1) + ' %', '100 derniers matchs'],
-      [brier.toFixed(3), 'Score de Brier (0,25 = hasard)'],
-      [(homeRate * 100).toFixed(1) + ' %', 'Référence : toujours le domicile'],
-    ].map(([b, s]) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`).join('');
+      [fr(acc * 100) + ' %', `Victoires bien prédites (${n} matchs)`],
+      [fr(acc100 * 100) + ' %', '100 derniers matchs'],
+      [fr(brier, 3), 'Score de Brier (0,25 = hasard)'],
+      [fr(homeRate * 100) + ' %', 'Référence : toujours le domicile'],
+    ].map(tile).join('');
   } else $('#stats').innerHTML = '<div class="empty">Pas encore assez de matchs.</div>';
 
-  // classement
+  const TL = M.tot.log, avg = (a) => a.reduce((s, x) => s + x, 0) / a.length;
+  if (TL.length >= 30) {
+    const tiles = [
+      [fr(avg(TL.map((x) => Math.abs(x.tot - x.act)))) + ' pts', `Erreur moyenne du total prévu (${TL.length} matchs)`],
+      [fr(avg(TL.map((x) => Math.abs(2 * x.lg - x.act)))) + ' pts', 'Référence : toujours la moyenne de la ligue'],
+    ];
+    const W = TL.filter((x) => x.ou);
+    if (W.length >= 30) {
+      tiles.push([fr(avg(W.map((x) => Math.abs(x.ou - x.act)))) + ' pts', `Erreur de la ligne O/U ESPN (${W.length} matchs)`]);
+      tiles.push([fr(avg(W.map((x) => Math.abs(x.tot - x.act)))) + ' pts', 'Modèle sur ces mêmes matchs']);
+      const E = W.filter((x) => Math.abs(x.tot - x.ou) >= OU_EDGE && x.act !== x.ou);
+      if (E.length >= 20) tiles.push([Math.round(E.filter((x) => (x.tot > x.ou) === (x.act > x.ou)).length / E.length * 100) + ' %',
+        `Over/Under bien prédits quand le modèle s'écarte d'au moins ${OU_EDGE} pts de la ligne (${E.length} matchs)`]);
+    } else tiles.push(['–', "Pas assez d'anciennes lignes O/U ESPN pour comparer"]);
+    $('#totstats').innerHTML = tiles.map(tile).join('');
+  } else $('#totstats').innerHTML = '<div class="empty">Pas encore assez de matchs.</div>';
+
+  const tl = [];
+  if (M.tune) {
+    tl.push([fr(M.tune.bTuned, 3) + ' contre ' + fr(M.tune.bBase, 3), `Score de Brier avec le réglage auto, contre le réglage de départ, sur les ${M.tune.n} derniers matchs (plus bas = mieux)`]);
+    tl.push([fr(M.tune.aTuned * 100) + ' % contre ' + fr(M.tune.aBase * 100) + ' %', M.tune.used ? 'Victoires bien prédites, même test : le réglage auto est gardé' : 'Victoires bien prédites, même test : le réglage auto ne fait pas mieux, on garde celui de départ']);
+  }
+  if (M.stack) {
+    tl.push([fr(M.stack.bS, 3) + ' contre ' + fr(M.stack.bC, 3), M.stack.used ? "Brier avec la combinaison de signaux (Elo, attaque-défense, forme, repos, valeur des joueurs) contre l'Elo seul : combinaison gardée" : "Brier avec la combinaison de signaux contre l'Elo seul : ça n'aide pas, on garde l'Elo seul"]);
+    tl.push([fr(M.stack.aS * 100) + ' % contre ' + fr(M.stack.aC * 100) + ' %', 'Victoires bien prédites, même test (combinaison contre Elo seul)']);
+    if (M.wts) tl.push([`Elo ${fr(M.wts[1], 2)}`, `Poids appris : attaque-défense ${fr(M.wts[2], 2)} · forme ${fr(M.wts[3], 2)} · repos ${fr(M.wts[4], 2)} · valeur des joueurs ${fr(M.wts[5], 2)}`]);
+  }
+  if (M.calib) tl.push([fr(M.calib.bCal, 3) + ' contre ' + fr(M.calib.bRaw, 3), M.calib.used ? 'Brier avec et sans étalonnage des pourcentages : étalonnage gardé' : 'Brier avec et sans étalonnage : ça n\'aide pas, on ne l\'applique pas']);
+  $('#tune').innerHTML = tl.length ? tl.map(tile).join('') : '<div class="empty">Pas encore assez de matchs pour régler le modèle.</div>';
+  const pt = [[`${M.nBox}`, 'Matchs dont on a le détail des joueurs (saison en cours et précédente)']];
+  if (db.inj && db.inj.n === 0 && db.inj.dbg) pt.push(['?', 'Aucun blessé lu. Réponse ESPN : ' + db.inj.dbg]);
+  pt.push([db.inj ? `${db.inj.n}` : '–', db.inj ? `Joueurs blessés annoncés par ESPN (chargé à ${new Date(db.inj.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })})` : 'Blessures pas encore chargées']);
+  if (M.absT) pt.push([fr(M.absT.w, 3) + ' contre ' + fr(M.absT.w0, 3), `Brier avec et sans les absences, sur les ${M.tune ? M.tune.n : 400} derniers matchs (poids réglé : ${M.prm.ABS})`]);
+  else pt.push([M.prm.ABS ? String(M.prm.ABS) : '0', M.nBox < 300 ? "Poids des absences : pas encore assez de matchs détaillés pour le régler" : "Poids des absences réglé à 0 : ça n'améliore pas la prévision sur tes données"]);
+  $('#players').innerHTML = pt.map(tile).join('');
+  const sf = M.safe, pc = (s) => (s[0] ? Math.round(s[1] / s[0] * 100) + ' %' : '–'), an = (s) => (s[0] ? Math.round(s[2] / s[0] * 100) : 0);
+  $('#safe').innerHTML = [
+    [pc(sf.win), `Vainqueur quand le modèle dépasse ${Math.round(SAFE_WIN * 100)} % : réussite réelle (annoncé ${an(sf.win)} %, ${sf.win[0]} matchs)`],
+    [pc(sf.over), `Over à la ligne « sûre » : réussite réelle (annoncé ${an(sf.over)} %, ${sf.over[0]} matchs)`],
+    [pc(sf.under), `Under à la ligne « sûre » : réussite réelle (annoncé ${an(sf.under)} %, ${sf.under[0]} matchs)`],
+    [pc(sf.hcp), `Handicap « sûr » du favori : réussite réelle (annoncé ${an(sf.hcp)} %, ${sf.hcp[0]} matchs)`],
+  ].map(tile).join('') + `<div class="stat"><b>${fr(M.sigT, 1)} / ${fr(M.sigM, 1)}</b><span>Écart typique sur le total / sur la marge (points) : plus il est bas, plus les paris sûrs sont proches</span></div>`;
+  const bins = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 1.01]];
+  const rows = bins.map(([lo, hi]) => {
+    const B = L.filter((x) => Math.max(x.p, 1 - x.p) >= lo && Math.max(x.p, 1 - x.p) < hi);
+    if (!B.length) return '';
+    const pa = B.reduce((s, x) => s + Math.max(x.p, 1 - x.p), 0) / B.length, ok = accOf(B);
+    return `<tr><td>${Math.round(lo * 100)}–${hi > 1 ? 100 : Math.round(hi * 100)} %</td><td class="n">${B.length}</td><td class="n">${fr(pa * 100, 0)} %</td><td class="n">${fr(ok * 100, 0)} %</td></tr>`;
+  }).join('');
+  $('#calib').innerHTML = rows ? '<tr><th>Confiance</th><th class="n">Matchs</th><th class="n">Annoncé</th><th class="n">Réel</th></tr>' + rows : '';
   const teams = Object.keys(M.elo).sort((a, b) => M.elo[b] - M.elo[a]);
   $('#rank').innerHTML = '<tr><th>#</th><th>Équipe</th><th class="n">Elo</th></tr>'
     + teams.map((id, i) => `<tr><td>${i + 1}</td><td>${esc(T(id).n)}</td><td class="n">${Math.round(M.elo[id])}</td></tr>`).join('');
+  $('#oddsKey').value = getKey();
+  $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
+    : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
+    : 'Clé enregistrée, cotes pas encore chargées.';
+  $('#modelnote').textContent = `Modèle v4.0 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+}
+
+// ---------- Affichage : onglet Joués ----------
+const view = { team: '', opp: '', season: '', shown: 25, upMin: 0 };
+let lastModel = null;
+const seasonLabel = (y) => `${y}-${pad((y + 1) % 100)}`;
+
+function fillFilters() {
+  const ids = Object.keys(db.teams).sort((a, b) => db.teams[a].n.localeCompare(db.teams[b].n, 'fr'));
+  const teamOpts = (all) => `<option value="">${all}</option>` + ids.map((id) => `<option value="${esc(id)}">${esc(db.teams[id].n)}</option>`).join('');
+  const seasons = [...new Set(Object.values(db.games).map((g) => seasonOf(g.t)))].sort((a, b) => b - a);
+  $('#fTeam').innerHTML = teamOpts('Équipe');
+  $('#fOpp').innerHTML = teamOpts('Adversaire');
+  $('#fSeason').innerHTML = '<option value="">Saison</option>' + seasons.map((y) => `<option value="${y}">${seasonLabel(y)}</option>`).join('');
+  $('#fTeam').value = view.team; $('#fOpp').value = view.opp; $('#fSeason').value = view.season;
+}
+function summaryTiles(list, A, B, M) {
+  let w = 0, hw = 0, hl = 0, aw = 0, al = 0, sm = 0, ok = 0, np = 0;
+  for (const g of list) {
+    const home = g.h === A, my = home ? g.hs : g.as, th = home ? g.as : g.hs;
+    if (my > th) { w++; if (home) hw++; else aw++; } else if (home) hl++; else al++;
+    sm += my - th;
+    const p = M.pred[g.id];
+    if (p) { np++; if ((p.p >= 0.5) === (g.hs > g.as)) ok++; }
+  }
+  const n = list.length, a = T(A).ab, b = B ? T(B).ab : '';
+  return [
+    [`${w}–${n - w}`, B ? `${a} contre ${b} (${n} matchs)` : `Victoires–défaites de ${a} (${n} matchs)`],
+    [`${hw}–${hl} · ${aw}–${al}`, 'Domicile · Extérieur'],
+    [signed(sm / n, 1), `Marge moyenne de ${a}`],
+    [np ? `${(ok / np * 100).toFixed(0)} %` : '–', 'Victoires bien prédites par le modèle'],
+  ];
+}
+function qTable(g, H, Aw) {
+  if (!g.ls) return '<div class="line">Détail par quart-temps indisponible pour ce match.</div>';
+  const n = Math.max(g.ls.a.length, g.ls.h.length), cols = Array.from({ length: n }, (_, i) => i);
+  const head = cols.map((i) => `<th class="n">${i < 4 ? 'Q' + (i + 1) : 'OT' + (i - 3)}</th>`).join('');
+  const row = (ab, arr, tot) => `<tr><td>${esc(ab)}</td>${cols.map((i) => `<td class="n">${arr[i] ?? ''}</td>`).join('')}<td class="n"><b>${tot}</b></td></tr>`;
+  return `<div class="scroll q"><table><tr><th></th>${head}<th class="n">Total</th></tr>${row(Aw.ab, g.ls.a, g.as)}${row(H.ab, g.ls.h, g.hs)}</table></div>`;
+}
+function playedRow(g, M) {
+  const H = T(g.h), Aw = T(g.a), p = M.pred[g.id], tp = M.tot.pred[g.id], homeWin = g.hs > g.as;
+  let right = '', lines = '';
+  if (p) {
+    const pickHome = p.p >= 0.5, good = pickHome === homeWin, pk = pickHome ? p.p : 1 - p.p;
+    right = `<span class="${good ? 'ok' : 'ko'}">${good ? '✓ juste' : '✗ raté'}</span><span>Modèle : ${esc(pickHome ? H.ab : Aw.ab)} ${(pk * 100).toFixed(0)}%</span>`;
+    lines += `<div class="line">Marge : modèle ${esc(winTxt(p.m, H, Aw))} · réelle ${esc(winTxt(g.hs - g.as, H, Aw, 0))}${p.cold ? ' · <i>modèle en rodage</i>' : ''}</div>`;
+  }
+  const act = g.hs + g.as;
+  let tl = `Total : réel ${act} pts`;
+  if (tp) tl += ` · prévu ${fr(tp.tot)}`;
+  if (g.ou) tl += ` · O/U ESPN ${fr(g.ou)} → ${act > g.ou ? 'Over' : act < g.ou ? 'Under' : 'égalité'}`;
+  lines += `<div class="line">${esc(tl)}</div>`;
+  const sp = g.o ? parseSpread(g.o, H.ab, Aw.ab) : null;
+  if (sp !== null) {
+    const m = g.hs - g.as;
+    lines += `<div class="line">Ligne ESPN : ${esc(lineTxt(sp, H, Aw))} · ${m === sp ? 'égalité' : esc(m > sp ? H.ab : Aw.ab) + ' couvre'}</div>`;
+  }
+  const wa = homeWin ? '' : 'w', wh = homeWin ? 'w' : '';
+  return `<details class="game"><summary>
+    <div class="sc"><div class="${wa}" title="${esc(Aw.n)}"><span>${esc(Aw.ab)}</span><span>${g.as}</span></div><div class="${wh}" title="${esc(H.n)}"><span>${esc(H.ab)}</span><span>${g.hs}</span></div></div>
+    <div class="sep"></div><div class="rt">${right}</div></summary>
+    <div class="det">${lines}${qTable(g, H, Aw)}</div></details>`;
+}
+function renderPlayed() {
+  const M = lastModel; if (!M) return;
+  let A = view.team, B = view.opp;
+  if (!A && B) { A = B; B = ''; }
+  if (A === B) B = '';
+  let list = Object.entries(db.games).map(([id, g]) => ({ id, ...g }));
+  if (view.season) list = list.filter((g) => String(seasonOf(g.t)) === view.season);
+  if (A) list = list.filter((g) => g.h === A || g.a === A);
+  if (B) list = list.filter((g) => g.h === B || g.a === B);
+  list.sort((x, y) => (x.t < y.t ? 1 : x.t > y.t ? -1 : 0));
+  if (!list.length) {
+    $('#h2h').innerHTML = ''; $('#played').innerHTML = '<div class="empty">Aucun match pour ce filtre.</div>'; $('#more').hidden = true;
+    return;
+  }
+  $('#h2h').innerHTML = A ? summaryTiles(list, A, B, M).map(([b, s]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(s)}</span></div>`).join('') : '';
+  let html = '', cur = '', label = '', grp = [];
+  const flush = () => { if (grp.length) html += `<div class="dayh"><span>${esc(label)}</span><span>${grp.length} match${grp.length > 1 ? 's' : ''}</span></div><div class="grp">${grp.join('')}</div>`; grp = []; };
+  for (const g of list.slice(0, view.shown)) {
+    const d = new Date(g.t), key = ymd(d);
+    if (key !== cur) { flush(); cur = key; label = dayLabel(d); }
+    grp.push(playedRow(g, M));
+  }
+  flush();
+  $('#played').innerHTML = html;
+  $('#more').hidden = list.length <= view.shown;
+}
+
+function render() {
+  const M = runModel(); lastModel = M;
+  resolveBets(); renderUp(M); renderModel(M); fillFilters(); renderPlayed(); renderJournal(); renderTicket();
+}
+
+// ---------- Ticket (paris simples et combinés) et journal ----------
+const JOURNAL_LS = 'nbaPredict.journal';
+let journal = (() => { try { const v = JSON.parse(localStorage.getItem(JOURNAL_LS)); if (v && Array.isArray(v.bets)) return v; } catch (e) {} return { start: 100, bets: [] }; })();
+const saveJournal = () => { try { localStorage.setItem(JOURNAL_LS, JSON.stringify(journal)); } catch (e) {} };
+const ticket = { legs: [], open: false };
+const ctxById = {};                                   // contexte du modèle pour chaque match à venir affiché
+const invPhi = (p) => { let lo = -6, hi = 6; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (Phi(m) < p) lo = m; else hi = m; } return (lo + hi) / 2; };
+const lf = (x) => (Number.isInteger(x) ? String(x) : fr(x));
+const legLabel = (leg, ab) => leg.type === 'win' ? `${ab[leg.side]} gagne` : leg.type === 'over' ? `Over ${lf(leg.line)}` : leg.type === 'under' ? `Under ${lf(leg.line)}` : `${ab[leg.side]} ${leg.line >= 0 ? '+' : '-'}${lf(Math.abs(leg.line))}`;
+// Probabilité qu'un ensemble de sélections d'un même match passent ensemble (marge M et total T liés par la corrélation mesurée).
+function legsJoint(c, legs, rho, sigT, sigM) {
+  let mlo = -Infinity, mhi = Infinity, tlo = -Infinity, thi = Infinity, hasWin = false;
+  for (const l of legs) {
+    if (l.type === 'win') { hasWin = true; if (l.side === 'h') mlo = Math.max(mlo, 0); else mhi = Math.min(mhi, 0); }
+    else if (l.type === 'hcp') { if (l.side === 'h') mlo = Math.max(mlo, -l.line); else mhi = Math.min(mhi, l.line); }
+    else if (l.type === 'over') tlo = Math.max(tlo, l.line);
+    else thi = Math.min(thi, l.line);
+  }
+  if (mlo >= mhi || tlo >= thi) return 0;
+  const muM = hasWin ? sigM * invPhi(Math.min(0.999, Math.max(0.001, c.ph))) : c.margin, muT = c.tot;
+  const pT = (a, b) => Phi((b - muT) / sigT) - Phi((a - muT) / sigT), pM = (a, b) => Phi((b - muM) / sigM) - Phi((a - muM) / sigM);
+  const hasM = isFinite(mlo) || isFinite(mhi), hasT = isFinite(tlo) || isFinite(thi);
+  if (hasM && !hasT) return pM(mlo, mhi);
+  if (hasT && !hasM) return pT(tlo, thi);
+  const a = Math.max(mlo, muM - 5 * sigM), b = Math.min(mhi, muM + 5 * sigM); if (a >= b) return 0;
+  const N = 200, dx = (b - a) / N, cs = sigT * Math.sqrt(1 - rho * rho); let s = 0;
+  for (let i = 0; i < N; i++) {
+    const m = a + (i + 0.5) * dx, z = (m - muM) / sigM, cm = muT + rho * sigT * z;
+    s += Math.exp(-z * z / 2) / (sigM * 2.5066283) * (Phi((thi - cm) / cs) - Phi((tlo - cm) / cs)) * dx;
+  }
+  return s;
+}
+function ticketP(M) {
+  const by = {}; for (const l of ticket.legs) (by[l.gid] = by[l.gid] || []).push(l);
+  let p = 1;
+  for (const gid in by) { const c = ctxById[gid]; if (!c) return null; p *= legsJoint(c, by[gid], M.rho || 0, M.sigT, M.sigM); }
+  return p;
+}
+function addLeg(leg) {
+  const k = (l) => l.gid + '|' + l.type + '|' + (l.side || '');
+  const i = ticket.legs.findIndex((l) => k(l) === k(leg));
+  if (i >= 0) ticket.legs.splice(i, 1);
+  else {
+    if (leg.type === 'over' || leg.type === 'under') ticket.legs = ticket.legs.filter((l) => !(l.gid === leg.gid && (l.type === 'over' || l.type === 'under')));
+    if (leg.type === 'win') ticket.legs = ticket.legs.filter((l) => !(l.gid === leg.gid && l.type === 'win'));
+    ticket.legs.push(leg);
+  }
+}
+function ticketSummary() {
+  const M = lastModel; if (!M) return;
+  const p = ticketP(M), odds = parseFloat(($('#tkOdds') || {}).value), stake = parseFloat(($('#tkStake') || {}).value);
+  const out = [];
+  if (p !== null) {
+    out.push(`Probabilité estimée : <b>${(p * 100).toFixed(0)} %</b> · cote minimale pour ne pas perdre à terme : <b>${p > 0 ? fr(1 / p, 2) : '–'}</b>`);
+    if (odds > 1) {
+      const ev = p * odds - 1;
+      out.push(`Avec ta cote ${fr(odds, 2)} : valeur <b class="${ev > 0 ? 'ok' : 'ko'}">${signed(ev * 100)} %</b>${ev > 0 ? '' : ' (le pari n\'est pas rentable à terme selon le modèle)'}`);
+      if (ev > 0) {
+        const bk = journalStats().bank, kelly = Math.min(0.05, ev / (odds - 1) / 4);
+        out.push(`Mise suggérée : environ <b>${fr(bk * kelly, 2)} €</b> (un quart de Kelly, plafonné à 5 % de la bankroll). Ne mise jamais plus que ce que tu peux perdre.`);
+      }
+    }
+  }
+  $('#tkSum').innerHTML = out.map((x) => `<div class="line">${x}</div>`).join('');
+  $('#tkBarTxt').innerHTML = `${ticket.legs.length} sélection${ticket.legs.length > 1 ? 's' : ''}${p !== null ? ` · ${(p * 100).toFixed(0)} %` : ''}`;
+  $('#tkSave').disabled = !(odds > 1 && stake > 0 && ticket.legs.length);
+}
+function renderTicket() {
+  const box = $('#ticket'), on = ticket.legs.length > 0 && !$('#tab-up').hidden;
+  document.body.classList.toggle('tk', ticket.legs.length > 0);
+  box.hidden = !on; if (!on) return;
+  const rows = ticket.legs.map((l, i) => {
+    const c = ctxById[l.gid]; if (!c) return '';
+    const ab = { h: c.H.ab, a: c.A.ab }, hasLine = l.type !== 'win';
+    return `<div class="tl"><span>${esc(c.A.ab)} @ ${esc(c.H.ab)} · <b>${esc(legLabel(l, ab))}</b></span>${hasLine ? `<input type="number" inputmode="decimal" step="0.5" value="${l.line}" data-i="${i}" aria-label="Ligne">` : '<span></span>'}<button type="button" class="x" data-rm="${i}" aria-label="Retirer">×</button></div>`;
+  }).join('');
+  const keep = { odds: ($('#tkOdds') || {}).value || '', stake: ($('#tkStake') || {}).value || '' };
+  box.innerHTML = `<button type="button" class="tkbar" id="tkBar"><span id="tkBarTxt"></span><span>${ticket.open ? 'Réduire ▾' : 'Ouvrir le ticket ▴'}</span></button>
+    <div class="tkbody" ${ticket.open ? '' : 'hidden'}>${rows}
+      <div class="tk2"><label>Cote Betclic<input id="tkOdds" type="number" inputmode="decimal" step="0.01" min="1.01" value="${esc(keep.odds)}"></label><label>Mise (€)<input id="tkStake" type="number" inputmode="decimal" step="0.5" min="0" value="${esc(keep.stake)}"></label></div>
+      <div id="tkSum"></div>
+      <div class="note">Plusieurs sélections du même match : le calcul tient compte de leur lien, mesuré sur tes données. Entre la ligne exacte proposée par Betclic pour recalculer la probabilité.</div>
+      <div class="tk3"><button type="button" class="more" id="tkClear">Vider</button><button type="button" class="more pri" id="tkSave" disabled>Enregistrer le pari</button></div></div>`;
+  ticketSummary();
+}
+function saveTicket() {
+  const M = lastModel, p = ticketP(M), odds = parseFloat($('#tkOdds').value), stake = parseFloat($('#tkStake').value);
+  if (!(odds > 1 && stake > 0) || !ticket.legs.length) return;
+  const legs = ticket.legs.map((l) => { const c = ctxById[l.gid], ab = { h: c.H.ab, a: c.A.ab }; return { gid: l.gid, type: l.type, side: l.side, line: l.line, label: legLabel(l, ab), ha: c.H.ab, aa: c.A.ab, t: c.t }; });
+  journal.bets.unshift({ id: Date.now(), at: new Date().toISOString(), stake, odds, p, legs, status: 'open' });
+  saveJournal(); ticket.legs = []; ticket.open = false; resolveBets(); renderTicket(); renderJournal();
+  document.querySelectorAll('#games .chip').forEach((b) => b.setAttribute('aria-pressed', 'false'));
+  setStatus('Pari enregistré dans le journal');
+}
+// Résolution automatique avec les résultats ESPN
+function legResult(l) {
+  const g = db.games[l.gid]; if (!g) return null;
+  const act = g.hs + g.as, mg = g.hs - g.as;
+  let v;
+  if (l.type === 'win') v = (l.side === 'h' ? mg : -mg);
+  else if (l.type === 'hcp') v = (l.side === 'h' ? mg : -mg) + l.line;
+  else if (l.type === 'over') v = act - l.line;
+  else v = l.line - act;
+  return v > 0 ? 'won' : v < 0 ? 'lost' : 'push';
+}
+function resolveBets() {
+  let ch = false;
+  for (const b of journal.bets) {
+    if (b.status !== 'open') continue;
+    const rs = b.legs.map(legResult);
+    if (rs.includes('lost')) b.status = 'lost';
+    else if (rs.some((r) => r === null)) continue;
+    else b.status = rs.every((r) => r === 'push') ? 'void' : rs.includes('push') ? 'check' : 'won';
+    b.pnl = b.status === 'won' ? b.stake * (b.odds - 1) : b.status === 'lost' ? -b.stake : 0;
+    ch = true;
+  }
+  if (ch) saveJournal();
+}
+function journalStats() {
+  const B = journal.bets, done = B.filter((b) => b.status === 'won' || b.status === 'lost'), open = B.filter((b) => b.status === 'open');
+  const net = B.reduce((s, b) => s + (b.pnl || 0), 0), staked = done.reduce((s, b) => s + b.stake, 0);
+  const won = done.filter((b) => b.status === 'won').length;
+  return { bank: journal.start + net - open.reduce((s, b) => s + b.stake, 0), net, staked, won, n: done.length, open: open.length, avgP: done.length ? done.reduce((s, b) => s + b.p, 0) / done.length : 0 };
+}
+function betHtml(b) {
+  const st = { open: 'En cours', won: 'Gagné', lost: 'Perdu', void: 'Remboursé', check: 'À vérifier (égalité sur une ligne)' }[b.status];
+  const cls = b.status === 'won' ? 'ok' : b.status === 'lost' ? 'ko' : '';
+  const legs = b.legs.map((l) => { const r = legResult(l); return `<div class="line">${r === 'won' ? '✓' : r === 'lost' ? '✗' : r === 'push' ? '=' : '·'} ${esc(l.aa)} @ ${esc(l.ha)} · ${esc(l.label)}</div>`; }).join('');
+  return `<div class="bet"><div class="bh"><b>${b.legs.length > 1 ? 'Combiné ' + b.legs.length : 'Simple'} · cote ${fr(b.odds, 2)} · mise ${fr(b.stake, 2)} €</b><span class="${cls}">${st}${b.pnl ? ' ' + signed(b.pnl, 2) + ' €' : ''}</span></div>${legs}<div class="line">Probabilité estimée ${(b.p * 100).toFixed(0)} % · ${new Date(b.at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</div><button type="button" class="del" data-del="${b.id}">Supprimer</button></div>`;
+}
+function renderJournal() {
+  const s = journalStats(), tile = ([b, t]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(t)}</span></div>`;
+  $('#jstats').innerHTML = [
+    [fr(s.bank, 2) + ' €', 'Bankroll disponible (mises en cours déduites)'],
+    [signed(s.net, 2) + ' €', `Résultat net (${s.n} paris terminés)`],
+    [s.staked ? signed(s.net / s.staked * 100, 1) + ' %' : '–', 'Rendement : gain net divisé par les mises'],
+    [s.n ? `${Math.round(s.won / s.n * 100)} %` : '–', s.n ? `Paris gagnés, contre ${Math.round(s.avgP * 100)} % annoncés par le modèle` : 'Paris gagnés'],
+  ].map(tile).join('');
+  $('#jstart').value = journal.start;
+  const open = journal.bets.filter((b) => b.status === 'open'), hist = journal.bets.filter((b) => b.status !== 'open');
+  $('#jopen').innerHTML = open.length ? `<h2>En cours</h2>${open.map(betHtml).join('')}` : '';
+  $('#jhist').innerHTML = hist.length ? `<h2>Historique</h2>${hist.map(betHtml).join('')}` : (open.length ? '' : '<div class="empty">Aucun pari enregistré. Dans À venir, touche les paris sûrs pour les ajouter au ticket, entre ta cote Betclic et ta mise, puis enregistre.</div>');
+}
+
+// ---------- Onglets ----------
+const TITLES = { played: 'Matchs joués', up: 'Matchs à venir', journal: 'Journal de paris', model: 'Modèle' };
+function setTab(t) {
+  for (const id of Object.keys(TITLES)) $('#tab-' + id).hidden = id !== t;
+  document.querySelectorAll('.tab').forEach((b) => {
+    const on = b.dataset.tab === t;
+    b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on));
+  });
+  $('#heading').textContent = TITLES[t];
+  renderTicket();
+  if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo(0, 0);
 }
 
 // ---------- Démarrage ----------
-$('#refresh').addEventListener('click', refresh);
+document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
+for (const [sel, key] of [['#fTeam', 'team'], ['#fOpp', 'opp'], ['#fSeason', 'season']]) {
+  $(sel).addEventListener('change', (e) => { view[key] = e.target.value; view.shown = 25; renderPlayed(); });
+}
+document.querySelectorAll('#upFilter button').forEach((b) => b.addEventListener('click', () => {
+  view.upMin = Number(b.dataset.min);
+  document.querySelectorAll('#upFilter button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  if (lastModel) renderUp(lastModel);
+}));
+$('#games').addEventListener('click', (e) => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  const t = b.dataset.t, c = ctxById[b.dataset.gid]; if (!c) return;
+  addLeg({ gid: b.dataset.gid, type: t, side: b.dataset.s || undefined, line: t === 'win' ? 0 : Number(b.dataset.l) });
+  const on = ticket.legs.some((l) => l.gid === b.dataset.gid && l.type === t && (t === 'over' || t === 'under' || l.side === b.dataset.s));
+  b.setAttribute('aria-pressed', String(on));
+  document.querySelectorAll(`#games .chip[data-gid="${b.dataset.gid}"][data-t="${t === 'over' ? 'under' : t === 'under' ? 'over' : '\u0000'}"]`).forEach((x) => x.setAttribute('aria-pressed', 'false'));
+  renderTicket();
+});
+$('#ticket').addEventListener('click', (e) => {
+  if (e.target.closest('#tkBar')) { ticket.open = !ticket.open; renderTicket(); return; }
+  const rm = e.target.closest('[data-rm]');
+  if (rm) { ticket.legs.splice(Number(rm.dataset.rm), 1); document.querySelectorAll('#games .chip').forEach((x) => x.setAttribute('aria-pressed', String(ticket.legs.some((l) => l.gid === x.dataset.gid && l.type === x.dataset.t && (x.dataset.t === 'over' || x.dataset.t === 'under' || l.side === x.dataset.s))))); renderTicket(); return; }
+  if (e.target.closest('#tkClear')) { ticket.legs = []; ticket.open = false; document.querySelectorAll('#games .chip').forEach((x) => x.setAttribute('aria-pressed', 'false')); renderTicket(); return; }
+  if (e.target.closest('#tkSave')) saveTicket();
+});
+$('#ticket').addEventListener('input', (e) => {
+  if (e.target.dataset && e.target.dataset.i !== undefined) { const v = parseFloat(e.target.value); if (Number.isFinite(v)) ticket.legs[Number(e.target.dataset.i)].line = v; }
+  ticketSummary();
+});
+$('#jstart').addEventListener('change', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v) && v >= 0) { journal.start = v; saveJournal(); renderJournal(); } });
+$('#tab-journal').addEventListener('click', (e) => {
+  const d = e.target.closest('[data-del]'); if (!d) return;
+  if (d.dataset.arm) { journal.bets = journal.bets.filter((b) => String(b.id) !== d.dataset.del); saveJournal(); renderJournal(); return; }
+  d.dataset.arm = '1'; d.textContent = 'Confirmer la suppression';
+});
+$('#more').addEventListener('click', () => { view.shown += 25; renderPlayed(); });
+$('#refresh').addEventListener('click', () => refresh(true));
+$('#saveKey').addEventListener('click', () => {
+  const v = $('#oddsKey').value.trim();
+  try { if (v) localStorage.setItem(KEY_LS, v); else localStorage.removeItem(KEY_LS); } catch (e) {}
+  db.odds = null; save(); refresh(true);
+});
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && (!db.updatedAt || Date.now() - Date.parse(db.updatedAt) > 15 * 60e3)) refresh();
 });
+setTab('up');
 render();
 if (db.updatedAt) setStatus('Données en cache · mise à jour…');
 refresh();
