@@ -447,13 +447,20 @@ function runModel() {
   }
   const warmG = [];
   games.forEach((g, i) => { const pr = R.pred[g.id], tp = tot.pred[g.id]; if (pr && !pr.cold && tp && !tp.cold) warmG.push({ g, i, pr, tp }); });
-  let sT = 0, sM = 0;
-  for (const x of warmG) { sT += (x.tp.tot - (x.g.hs + x.g.as)) ** 2; sM += (x.pr.m - (x.g.hs - x.g.as)) ** 2; }
+  // La marge affichée découle de la probabilité finale (même source que les pourcentages) : marge = échelle × invPhi(p), l'échelle étant apprise sur tes matchs.
+  const clampP = (p) => Math.min(0.995, Math.max(0.005, p));
+  let sT = 0, sxy = 0, sxx = 0;
+  for (const x of warmG) { x.z = invPhi(clampP(x.pr.p)); sT += (x.tp.tot - (x.g.hs + x.g.as)) ** 2; sxy += x.z * (x.g.hs - x.g.as); sxx += x.z * x.z; }
+  const mScale = warmG.length > 50 && sxx > 0 ? sxy / sxx : 12;
+  let sM = 0;
+  for (const x of warmG) { x.m = mScale * x.z; sM += (x.m - (x.g.hs - x.g.as)) ** 2; }
   const sigT = warmG.length > 50 ? Math.sqrt(sT / warmG.length) : 18, sigM = warmG.length > 50 ? Math.sqrt(sM / warmG.length) : 12;
+  const marginOf = (p) => mScale * invPhi(clampP(p));
+  for (const id in R.pred) R.pred[id].m = marginOf(R.pred[id].p);
   const safe = { win: [0, 0, 0], over: [0, 0, 0], under: [0, 0, 0], hcp: [0, 0, 0] };   // [matchs, réussis, somme des probabilités annoncées]
   for (const x of warmG) {
     const { g, pr, tp } = x, act = g.hs + g.as, ph = pr.p;
-    for (const b of safeBets({ ab: 'H' }, { ab: 'A' }, ph, pr.m, tp.tot, sigT, sigM)) {
+    for (const b of safeBets({ ab: 'H' }, { ab: 'A' }, ph, x.m, tp.tot, sigT, sigM)) {
       let hit;
       if (b.kind === 'win') hit = (g.hs > g.as) === (ph >= 0.5);
       else if (b.kind === 'over') hit = act > b.L;
@@ -463,9 +470,9 @@ function runModel() {
     }
   }
   let cMT = 0, vM = 0, vT = 0;
-  for (const x of warmG) { const rm = (x.g.hs - x.g.as) - x.pr.m, rt = (x.g.hs + x.g.as) - x.tp.tot; cMT += rm * rt; vM += rm * rm; vT += rt * rt; }
+  for (const x of warmG) { const rm = (x.g.hs - x.g.as) - x.m, rt = (x.g.hs + x.g.as) - x.tp.tot; cMT += rm * rt; vM += rm * rm; vT += rt * rt; }
   const rho = warmG.length > 50 && vM > 0 && vT > 0 ? Math.max(-0.5, Math.min(0.5, cMT / Math.sqrt(vM * vT))) : 0;
-  const M = { sigT, sigM, safe, rho, elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
+  const M = { sigT, sigM, marginOf, safe, rho, elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
   M.winP = (h, a, day) => {   // probabilité que le domicile gagne un match à venir
     const raw = 1 / (1 + Math.pow(10, -eloDiff(M, h, a, day) / 400));
     if (!w) return cal(raw);
@@ -580,7 +587,7 @@ function safeBets(H, A, ph, margin, tot, sigT, sigM) {
 function upCard(g, M, picks) {
   const H = T(g.h), A = T(g.a), day = dayKey(g.t);
   const diff = eloDiff(M, g.h, g.a, day);
-  const ph = M.winP(g.h, g.a, day), pa = 1 - ph, margin = diff / PTS;
+  const ph = M.winP(g.h, g.a, day), pa = 1 - ph, margin = M.marginOf(ph);
   const time = new Date(g.t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
   const spread = g.odds ? parseSpread(g.odds.details, H.ab, A.ab) : null;
   let tag = '', tagCls = '', l2 = 'Pas de ligne ESPN pour le moment';
@@ -708,7 +715,7 @@ function renderModel(M) {
   $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
     : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
     : 'Clé enregistrée, cotes pas encore chargées.';
-  $('#modelnote').textContent = `Modèle v4.1 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#modelnote').textContent = `Modèle v4.2 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
@@ -913,7 +920,7 @@ function legResult(l) {
 function resolveBets() {
   let ch = false;
   for (const b of journal.bets) {
-    if (b.status !== 'open') continue;
+    if (b.status !== 'open' || b.manual) continue;
     const rs = b.legs.map(legResult);
     if (rs.includes('lost')) b.status = 'lost';
     else if (rs.some((r) => r === null)) continue;
@@ -927,13 +934,17 @@ function journalStats() {
   const B = journal.bets, done = B.filter((b) => b.status === 'won' || b.status === 'lost'), open = B.filter((b) => b.status === 'open');
   const net = B.reduce((s, b) => s + (b.pnl || 0), 0), staked = done.reduce((s, b) => s + b.stake, 0);
   const won = done.filter((b) => b.status === 'won').length;
-  return { bank: journal.start + net - open.reduce((s, b) => s + b.stake, 0), net, staked, won, n: done.length, open: open.length, avgP: done.length ? done.reduce((s, b) => s + b.p, 0) / done.length : 0 };
+  return { bank: journal.start + net - open.reduce((s, b) => s + b.stake, 0), net, staked, won, n: done.length, open: open.length, nP: done.filter((b) => b.p > 0).length, avgP: done.filter((b) => b.p > 0).length ? done.filter((b) => b.p > 0).reduce((s, b) => s + b.p, 0) / done.filter((b) => b.p > 0).length : 0 };
 }
 function betHtml(b) {
   const st = { open: 'En cours', won: 'Gagné', lost: 'Perdu', void: 'Remboursé', check: 'À vérifier (égalité sur une ligne)' }[b.status];
   const cls = b.status === 'won' ? 'ok' : b.status === 'lost' ? 'ko' : '';
-  const legs = b.legs.map((l) => { const r = legResult(l); return `<div class="line">${r === 'won' ? '✓' : r === 'lost' ? '✗' : r === 'push' ? '=' : '·'} ${esc(l.ha)} vs ${esc(l.aa)} · ${esc(l.label)}</div>`; }).join('');
-  return `<div class="bet"><div class="bh"><b>${b.legs.length > 1 ? 'Combiné ' + b.legs.length : 'Simple'} · cote ${fr(b.odds, 2)} · mise ${fr(b.stake, 2)} €</b><span class="${cls}">${st}${b.pnl ? ' ' + signed(b.pnl, 2) + ' €' : ''}</span></div>${legs}<div class="line">Probabilité estimée ${(b.p * 100).toFixed(0)} % · ${new Date(b.at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</div><button type="button" class="del" data-del="${b.id}">Supprimer</button></div>`;
+  const legs = b.manual ? `<div class="line">${esc(b.label || 'Ticket Betclic')}</div>`
+    : b.legs.map((l) => { const r = legResult(l); return `<div class="line">${r === 'won' ? '✓' : r === 'lost' ? '✗' : r === 'push' ? '=' : '·'} ${esc(l.ha)} vs ${esc(l.aa)} · ${esc(l.label)}</div>`; }).join('');
+  const kind = b.manual ? (b.kind === 'combo' ? 'Combiné' : 'Simple') : (b.legs.length > 1 ? 'Combiné ' + b.legs.length : 'Simple');
+  const when = new Date(b.at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+  const res = b.manual && b.status === 'open' ? `<div class="resbtns"><span>Résultat :</span><button type="button" data-res="won" data-id="${b.id}">Gagné</button><button type="button" data-res="lost" data-id="${b.id}">Perdu</button><button type="button" data-res="void" data-id="${b.id}">Remboursé</button></div>` : '';
+  return `<div class="bet"><div class="bh"><b>${kind} · cote ${fr(b.odds, 2)} · mise ${fr(b.stake, 2)} €</b><span class="${cls}">${st}${b.pnl ? ' ' + signed(b.pnl, 2) + ' €' : ''}</span></div>${legs}<div class="line">${b.p > 0 ? `Probabilité estimée ${(b.p * 100).toFixed(0)} % · ` : 'Saisi à la main · '}${when}</div>${res}<button type="button" class="del" data-del="${b.id}">Supprimer</button></div>`;
 }
 function renderJournal() {
   const s = journalStats(), tile = ([b, t]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(t)}</span></div>`;
@@ -941,12 +952,14 @@ function renderJournal() {
     [fr(s.bank, 2) + ' €', 'Bankroll disponible (mises en cours déduites)'],
     [signed(s.net, 2) + ' €', `Résultat net (${s.n} paris terminés)`],
     [s.staked ? signed(s.net / s.staked * 100, 1) + ' %' : '–', 'Rendement : gain net divisé par les mises'],
-    [s.n ? `${Math.round(s.won / s.n * 100)} %` : '–', s.n ? `Paris gagnés, contre ${Math.round(s.avgP * 100)} % annoncés par le modèle` : 'Paris gagnés'],
+    [s.n ? `${Math.round(s.won / s.n * 100)} %` : '–', s.n ? (s.nP ? `Paris gagnés, contre ${Math.round(s.avgP * 100)} % annoncés par le modèle sur ${s.nP} paris du ticket` : 'Paris gagnés') : 'Paris gagnés'],
   ].map(tile).join('');
   $('#jstart').value = journal.start;
-  const open = journal.bets.filter((b) => b.status === 'open'), hist = journal.bets.filter((b) => b.status !== 'open');
+  if (!$('#jfDate').value) $('#jfDate').value = new Date().toISOString().slice(0, 10);
+  const byDate = journal.bets.slice().sort((x, y) => (x.at < y.at ? 1 : -1));
+  const open = byDate.filter((b) => b.status === 'open'), hist = byDate.filter((b) => b.status !== 'open');
   $('#jopen').innerHTML = open.length ? `<h2>En cours</h2>${open.map(betHtml).join('')}` : '';
-  $('#jhist').innerHTML = hist.length ? `<h2>Historique</h2>${hist.map(betHtml).join('')}` : (open.length ? '' : '<div class="empty">Aucun pari enregistré. Dans À venir, touche les paris sûrs pour les ajouter au ticket, entre ta cote Betclic et ta mise, puis enregistre.</div>');
+  $('#jhist').innerHTML = hist.length ? `<h2>Historique</h2>${hist.map(betHtml).join('')}` : (open.length ? '' : '<div class="empty">Aucun pari enregistré. Ajoute un ticket joué ci-dessus, ou compose-le dans À venir avec les paris sûrs.</div>');
 }
 
 // ---------- Onglets ----------
@@ -993,7 +1006,23 @@ $('#ticket').addEventListener('input', (e) => {
   ticketSummary();
 });
 $('#jstart').addEventListener('change', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v) && v >= 0) { journal.start = v; saveJournal(); renderJournal(); } });
+$('#jfAdd').addEventListener('click', () => {
+  const odds = parseFloat($('#jfOdds').value), stake = parseFloat($('#jfStake').value), res = $('#jfRes').value;
+  if (!(odds > 1) || !(stake > 0)) { $('#jfMsg').textContent = 'Entre une cote supérieure à 1 et une mise.'; return; }
+  const day = $('#jfDate').value || new Date().toISOString().slice(0, 10);
+  const b = { id: Date.now(), at: new Date(day + 'T12:00:00').toISOString(), stake, odds, p: 0, legs: [], manual: true, kind: $('#jfKind').value, label: $('#jfDesc').value.trim() || 'Ticket Betclic', status: res };
+  b.pnl = res === 'won' ? stake * (odds - 1) : res === 'lost' ? -stake : 0;
+  journal.bets.push(b); saveJournal();
+  $('#jfDesc').value = ''; $('#jfOdds').value = ''; $('#jfStake').value = ''; $('#jfMsg').textContent = 'Ticket ajouté. La bankroll est à jour.';
+  renderJournal();
+});
 $('#tab-journal').addEventListener('click', (e) => {
+  const r = e.target.closest('[data-res]');
+  if (r) {
+    const b = journal.bets.find((x) => String(x.id) === r.dataset.id);
+    if (b) { b.status = r.dataset.res; b.pnl = b.status === 'won' ? b.stake * (b.odds - 1) : b.status === 'lost' ? -b.stake : 0; saveJournal(); renderJournal(); }
+    return;
+  }
   const d = e.target.closest('[data-del]'); if (!d) return;
   if (d.dataset.arm) { journal.bets = journal.bets.filter((b) => String(b.id) !== d.dataset.del); saveJournal(); renderJournal(); return; }
   d.dataset.arm = '1'; d.textContent = 'Confirmer la suppression';

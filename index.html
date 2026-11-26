@@ -112,6 +112,15 @@ button.chip[aria-pressed="true"]{background:var(--ok);color:#06150e;border-color
 .more[disabled]{opacity:.5}
 body.tk{padding-bottom:calc(190px + env(safe-area-inset-bottom))}
 .jst{margin:14px 0 4px}
+.addbet{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:0 14px 14px;margin:14px 0 4px}
+.addbet summary{min-height:48px;display:flex;align-items:center;font-weight:700;color:var(--acc);cursor:pointer;list-style:none}
+.addbet summary::-webkit-details-marker{display:none}
+.ab-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.ab-grid label{display:flex;flex-direction:column;gap:4px;color:var(--mut);font-size:12.5px;min-width:0}
+.ab-grid .wide{grid-column:1/-1}
+.ab-grid input,.ab-grid select{min-height:44px;width:100%;min-width:0;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:0 10px;font:inherit}
+.resbtns{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;color:var(--mut);font-size:12.5px}
+.resbtns button{min-height:44px;padding:0 14px;border-radius:22px;border:1px solid var(--line);background:transparent;color:var(--fg);font:inherit;font-weight:600}
 .bet{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;flex-direction:column;gap:4px}
 .bh{display:flex;justify-content:space-between;gap:8px;font-size:14px}
 .del{align-self:flex-start;margin-top:4px;min-height:44px;background:transparent;border:0;color:var(--mut);font:inherit;font-size:12.5px;padding:0}
@@ -165,6 +174,19 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
   <section id="tab-journal" hidden>
     <div id="jstats" class="stats"></div>
     <label class="jst">Bankroll de départ (€)<input id="jstart" type="number" inputmode="decimal" step="1" min="0" value="100"></label>
+    <details class="addbet" open>
+      <summary>Enregistrer un ticket joué</summary>
+      <div class="ab-grid">
+        <label>Type<select id="jfKind"><option value="single">Simple</option><option value="combo">Combiné</option></select></label>
+        <label>Date<input id="jfDate" type="date"></label>
+        <label class="wide">Description<input id="jfDesc" type="text" maxlength="120" placeholder="ex. NY gagne de 6 ou + et + de 210,5" autocomplete="off"></label>
+        <label>Cote<input id="jfOdds" type="number" inputmode="decimal" step="0.01" min="1.01" placeholder="2,78"></label>
+        <label>Mise (€)<input id="jfStake" type="number" inputmode="decimal" step="0.01" min="0" placeholder="2"></label>
+        <label class="wide">Résultat<select id="jfRes"><option value="open">En cours</option><option value="won">Gagné</option><option value="lost">Perdu</option><option value="void">Remboursé</option></select></label>
+      </div>
+      <button type="button" class="more pri" id="jfAdd">Ajouter à la bankroll</button>
+      <div class="note" id="jfMsg"></div>
+    </details>
     <div id="jopen"></div>
     <div id="jhist"></div>
     <p class="note">Les paris sont suivis et gagnés ou perdus automatiquement avec les résultats ESPN. Tout reste enregistré sur ce téléphone.</p>
