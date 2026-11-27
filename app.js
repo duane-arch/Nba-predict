@@ -1031,8 +1031,10 @@ for (const [sel, key] of [['#fTeam', 'team'], ['#fOpp', 'opp'], ['#fSeason', 'se
   $(sel).addEventListener('change', (e) => { view[key] = e.target.value; view.shown = 25; renderPlayed(); });
 }
 document.querySelectorAll('#upFilter button').forEach((b) => b.addEventListener('click', () => {
-  view.upMin = Number(b.dataset.min);
+  view.combo = b.dataset.min === 'combo';
+  if (!view.combo) view.upMin = Number(b.dataset.min);
   document.querySelectorAll('#upFilter button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  $('#combos').hidden = !view.combo; $('#games').hidden = view.combo; $('#picks').hidden = view.combo;
   if (lastModel) renderUp(lastModel);
 }));
 $('#combos').addEventListener('click', (e) => {

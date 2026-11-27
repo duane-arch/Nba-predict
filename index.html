@@ -92,6 +92,8 @@ td.n,th.n{text-align:right}
 
 .seg{display:flex;gap:8px;margin-bottom:12px}
 .seg button{flex:1;min-height:44px;border:1px solid var(--line);border-radius:22px;background:var(--panel);color:var(--mut);font-weight:600;padding:0 12px}
+#upFilter{gap:6px}
+#upFilter button{padding:0 6px;font-size:12.5px;white-space:nowrap;flex:1 1 auto}
 .seg button[aria-pressed="true"]{background:var(--line);color:var(--acc);border-color:var(--acc)}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 button.chip{min-height:40px;padding:0 12px;border-radius:20px;border:1px solid var(--line);background:transparent;color:var(--ok);font:inherit;font-size:12.5px;font-weight:600}
@@ -172,8 +174,8 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
   </section>
 
   <section id="tab-up">
-    <div class="seg" id="upFilter" role="group" aria-label="Filtrer les matchs"><button type="button" data-min="0" aria-pressed="true">Tous les matchs</button><button type="button" data-min="0.7" aria-pressed="false">Confiance ≥ 70 %</button></div>
-    <div id="combos"></div>
+    <div class="seg" id="upFilter" role="group" aria-label="Filtrer les matchs"><button type="button" data-min="0" aria-pressed="true">Tous les matchs</button><button type="button" data-min="0.7" aria-pressed="false">Confiance ≥ 70 %</button><button type="button" data-min="combo" aria-pressed="false">Combinés</button></div>
+    <div id="combos" hidden></div>
     <div id="picks"></div>
     <div id="games"><div class="empty">Aucune donnée pour l'instant.</div></div>
     <p class="note">Le total prévu vient du modèle pour chaque match. Le verdict Over/Under apparaît dès qu'ESPN publie sa ligne, en général peu avant le match.</p>
