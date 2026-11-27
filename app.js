@@ -1071,8 +1071,10 @@ async function readBadges(worker, prep) {
     let v = null;
     for (const psm of ['8', '13']) {
       await worker.setParameters({ tessedit_pageseg_mode: psm });
-      const { data } = await worker.recognize(b.crop), m = data.text.replace(/\s/g, '').match(/(\d{1,3})[,.](\d{2})/);
+      const { data } = await worker.recognize(b.crop), t = data.text.replace(/\s/g, ''), m = t.match(/(\d{1,3})[,.](\d{2})/);
       if (m) { v = parseFloat(m[1] + '.' + m[2]); break; }
+      const dg = (t.match(/\d+/) || [''])[0];   // la virgule est souvent perdue sur les chiffres italiques : 407 -> 4,07
+      if (dg.length >= 3 && dg.length <= 5) { v = parseFloat(dg.slice(0, dg.length - 2) + '.' + dg.slice(-2)); break; }
     }
     if (v && v >= 1.01 && v <= 500) out.push({ cy: b.y + b.h / 2, odds: v });
   }
@@ -1081,7 +1083,7 @@ async function readBadges(worker, prep) {
 }
 function attachBadges(tickets, lines, badges) {
   const ys = [];
-  for (const l of lines || []) { const m = String(l.text).match(/R[ée]f\.?\s*:?\s*([0-9a-fA-F]{8,32})/); if (m) ys.push([m[1].toLowerCase(), (l.bbox.y0 + l.bbox.y1) / 2]); }
+  for (const l of lines || []) { const m = String(l.text).match(/R[ée]f\.?\s*:?\s*([0-9A-Za-z]{8,32})\s+\d{2}\//); if (m) ys.push([BetParse.normRef(m[1]), (l.bbox.y0 + l.bbox.y1) / 2]); }
   ys.sort((p, q) => p[1] - q[1]);
   for (const b of badges) {
     let prev = -1;
