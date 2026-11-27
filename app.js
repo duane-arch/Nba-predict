@@ -472,7 +472,12 @@ function runModel() {
   let cMT = 0, vM = 0, vT = 0;
   for (const x of warmG) { const rm = (x.g.hs - x.g.as) - x.m, rt = (x.g.hs + x.g.as) - x.tp.tot; cMT += rm * rt; vM += rm * rm; vT += rt * rt; }
   const rho = warmG.length > 50 && vM > 0 && vT > 0 ? Math.max(-0.5, Math.min(0.5, cMT / Math.sqrt(vM * vT))) : 0;
-  const M = { sigT, sigM, marginOf, safe, rho, elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
+  const combo = COMBO_T.map(() => [0, 0, 0]);   // [matchs, réussis, somme des probabilités annoncées] sur les 800 derniers matchs
+  for (const x of warmG.slice(-800)) {
+    const cands = comboScan({ ph: x.pr.p, margin: x.m, tot: x.tp.tot }, rho, sigT, sigM);
+    COMBO_T.forEach((t, k) => { const b = comboPick(cands, t); if (b) { combo[k][0]++; combo[k][1] += comboHit(b.legs, x.g.hs, x.g.as) ? 1 : 0; combo[k][2] += b.p; } });
+  }
+  const M = { sigT, sigM, marginOf, safe, combo, rho, elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
   M.winP = (h, a, day) => {   // probabilité que le domicile gagne un match à venir
     const raw = 1 / (1 + Math.pow(10, -eloDiff(M, h, a, day) / 400));
     if (!w) return cal(raw);
@@ -583,6 +588,29 @@ function safeBets(H, A, ph, margin, tot, sigT, sigM) {
   out.push({ kind: 'hcp', fav, side: fav, L: hl, label: `${fav === 'h' ? H.ab : A.ab} ${hl >= 0 ? '+' : '-'}${fr(Math.abs(hl))}`, p: Phi((mu + hl) / sigM) });
   return out;
 }
+
+// ---------- Combinés suggérés : un volet « marge » (victoire ou handicap du favori) + un volet « total » (Over ou Under) ----------
+const COMBO_T = [0.6, 0.65, 0.7];
+function comboScan(c, rho, sigT, sigM) {
+  const side = c.ph >= 0.5 ? 'h' : 'a', ml = [{ type: 'win', side }];
+  for (let L = -10.5; L <= -2.5; L += 2) ml.push({ type: 'hcp', side, line: L });
+  const tl = [];
+  for (let L = Math.floor((c.tot - 2.5 * sigT) / 5) * 5; L <= c.tot; L += 5) tl.push({ type: 'over', line: L });
+  for (let U = Math.ceil(c.tot / 5) * 5; U <= c.tot + 2.5 * sigT; U += 5) tl.push({ type: 'under', line: U });
+  const out = [];
+  for (const m of ml) for (const t of tl) out.push({ legs: [m, t], p: legsJoint(c, [m, t], rho, sigT, sigM, 80) });
+  return out;
+}
+const comboPick = (cands, t) => { let b = null; for (const x of cands) if (x.p >= t && (!b || x.p < b.p)) b = x; return b; };   // la plus ambitieuse qui passe le seuil
+function comboHit(legs, hs, as) {
+  const act = hs + as;
+  return legs.every((l) => {
+    if (l.type === 'over') return act > l.line;
+    if (l.type === 'under') return act < l.line;
+    const m = l.side === 'h' ? hs - as : as - hs;
+    return l.type === 'win' ? m > 0 : m + l.line > 0;
+  });
+}
 // ---------- Affichage : onglet À venir ----------
 function upCard(g, M, picks) {
   const H = T(g.h), A = T(g.a), day = dayKey(g.t);
@@ -622,7 +650,29 @@ function upCard(g, M, picks) {
     <div class="line">${l2}</div>
     <div class="line">${l3}</div>${abLine}${sbLine}${bt.html}</div>`;
 }
+
+function renderCombos(M) {
+  const box = $('#combos'), now = Date.now();
+  const list = db.upcoming.filter((g) => !g.live && Date.parse(g.t) > now);
+  const t = COMBO_T[view.comboK], rows = [];
+  for (const g of list) {
+    const H = T(g.h), A = T(g.a), day = dayKey(g.t), ph = M.winP(g.h, g.a, day), pt = predictTot(M, g.h, g.a), c = { H, A, ph, margin: M.marginOf(ph), tot: pt.tot, t: g.t };
+    const b = comboPick(comboScan(c, M.rho || 0, M.sigT, M.sigM), t);
+    if (b) { ctxById[g.id] = c; rows.push({ g, b, ab: { h: H.ab, a: A.ab } }); }
+  }
+  rows.sort((x, y) => y.b.p - x.b.p);
+  const seg = `<div class="seg" id="comboK" role="group" aria-label="Seuil de probabilité">${COMBO_T.map((v, k) => `<button type="button" data-k="${k}" aria-pressed="${k === view.comboK}">≥ ${Math.round(v * 100)} %</button>`).join('')}</div>`;
+  const bk = M.combo && M.combo[view.comboK], past = bk && bk[0] ? `Sur les ${bk[0]} derniers matchs joués, ces combinés sont passés ${Math.round(bk[1] / bk[0] * 100)} % du temps (annoncé ${Math.round(bk[2] / bk[0] * 100)} %).` : '';
+  const body = rows.length ? `<div class="grp picks">${rows.slice(0, 8).map((r) => {
+    const time = new Date(r.g.t).toLocaleString('fr-FR', { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+    const lab = r.b.legs.map((l) => legLabel(l, r.ab)).join(' & ');
+    return `<div class="pk"><div><b>${esc(lab)}</b><span>${esc(r.ab.h)} vs ${esc(r.ab.a)} · ${esc(time)} · cote juste ${fr(1 / r.b.p, 2)}</span></div><div><b class="ok">${(r.b.p * 100).toFixed(0)} %</b><br><button type="button" class="chip" data-combo="${esc(r.g.id)}">+ Ticket</button></div></div>`;
+  }).join('')}</div>` : `<div class="empty">Aucun combiné n'atteint ${Math.round(t * 100)} % pour le moment.</div>`;
+  box.innerHTML = `<h2>Combinés suggérés</h2>${seg}${body}<p class="note">Une victoire ou un handicap du favori, plus un Over ou un Under. Le modèle choisit la combinaison la plus ambitieuse qui reste au-dessus du seuil, en tenant compte du lien entre écart et total de points. ${past} Compare avec les lignes réelles de Betclic (modifiables dans le ticket) : aucune probabilité n'est une certitude.</p>`;
+  box._rows = rows;
+}
 function renderUp(M) {
+  try { renderCombos(M); } catch (e) { $('#combos').innerHTML = ''; }
   const box = $('#games'), now = Date.now();
   let list = db.upcoming.filter((g) => g.live || Date.parse(g.t) > now - 3 * 3600e3);
   if (view.upMin) list = list.filter((g) => { const p = M.winP(g.h, g.a, dayKey(g.t)); return Math.max(p, 1 - p) >= view.upMin; });
@@ -699,7 +749,7 @@ function renderModel(M) {
     [pc(sf.over), `Over à la ligne « sûre » : réussite réelle (annoncé ${an(sf.over)} %, ${sf.over[0]} matchs)`],
     [pc(sf.under), `Under à la ligne « sûre » : réussite réelle (annoncé ${an(sf.under)} %, ${sf.under[0]} matchs)`],
     [pc(sf.hcp), `Handicap « sûr » du favori : réussite réelle (annoncé ${an(sf.hcp)} %, ${sf.hcp[0]} matchs)`],
-  ].map(tile).join('') + `<div class="stat"><b>${fr(M.sigT, 1)} / ${fr(M.sigM, 1)}</b><span>Écart typique sur le total / sur la marge (points) : plus il est bas, plus les paris sûrs sont proches</span></div>`;
+  ].concat((M.combo || []).map((s, k) => (s[0] ? [Math.round(s[1] / s[0] * 100) + ' %', `Combinés suggérés ≥ ${Math.round(COMBO_T[k] * 100)} % : réussite réelle (annoncé ${Math.round(s[2] / s[0] * 100)} %, ${s[0]} matchs)`] : null)).filter(Boolean)).map(tile).join('') + `<div class="stat"><b>${fr(M.sigT, 1)} / ${fr(M.sigM, 1)}</b><span>Écart typique sur le total / sur la marge (points) : plus il est bas, plus les paris sûrs sont proches</span></div>`;
   const bins = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 1.01]];
   const rows = bins.map(([lo, hi]) => {
     const B = L.filter((x) => Math.max(x.p, 1 - x.p) >= lo && Math.max(x.p, 1 - x.p) < hi);
@@ -719,7 +769,7 @@ function renderModel(M) {
 }
 
 // ---------- Affichage : onglet Joués ----------
-const view = { team: '', opp: '', season: '', shown: 25, upMin: 0 };
+const view = { team: '', opp: '', season: '', shown: 25, upMin: 0, comboK: 1 };
 let lastModel = null;
 const seasonLabel = (y) => `${y}-${pad((y + 1) % 100)}`;
 
@@ -822,7 +872,7 @@ const invPhi = (p) => { let lo = -6, hi = 6; for (let i = 0; i < 40; i++) { cons
 const lf = (x) => (Number.isInteger(x) ? String(x) : fr(x));
 const legLabel = (leg, ab) => leg.type === 'win' ? `${ab[leg.side]} gagne` : leg.type === 'over' ? `Over ${lf(leg.line)}` : leg.type === 'under' ? `Under ${lf(leg.line)}` : `${ab[leg.side]} ${leg.line >= 0 ? '+' : '-'}${lf(Math.abs(leg.line))}`;
 // Probabilité qu'un ensemble de sélections d'un même match passent ensemble (marge M et total T liés par la corrélation mesurée).
-function legsJoint(c, legs, rho, sigT, sigM) {
+function legsJoint(c, legs, rho, sigT, sigM, steps) {
   let mlo = -Infinity, mhi = Infinity, tlo = -Infinity, thi = Infinity, hasWin = false;
   for (const l of legs) {
     if (l.type === 'win') { hasWin = true; if (l.side === 'h') mlo = Math.max(mlo, 0); else mhi = Math.min(mhi, 0); }
@@ -837,7 +887,7 @@ function legsJoint(c, legs, rho, sigT, sigM) {
   if (hasM && !hasT) return pM(mlo, mhi);
   if (hasT && !hasM) return pT(tlo, thi);
   const a = Math.max(mlo, muM - 5 * sigM), b = Math.min(mhi, muM + 5 * sigM); if (a >= b) return 0;
-  const N = 200, dx = (b - a) / N, cs = sigT * Math.sqrt(1 - rho * rho); let s = 0;
+  const N = steps || 200, dx = (b - a) / N, cs = sigT * Math.sqrt(1 - rho * rho); let s = 0;
   for (let i = 0; i < N; i++) {
     const m = a + (i + 0.5) * dx, z = (m - muM) / sigM, cm = muT + rho * sigT * z;
     s += Math.exp(-z * z / 2) / (sigM * 2.5066283) * (Phi((thi - cm) / cs) - Phi((tlo - cm) / cs)) * dx;
@@ -985,6 +1035,15 @@ document.querySelectorAll('#upFilter button').forEach((b) => b.addEventListener(
   document.querySelectorAll('#upFilter button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
   if (lastModel) renderUp(lastModel);
 }));
+$('#combos').addEventListener('click', (e) => {
+  const k = e.target.closest('#comboK button');
+  if (k) { view.comboK = Number(k.dataset.k); if (lastModel) renderCombos(lastModel); return; }
+  const b = e.target.closest('[data-combo]'); if (!b) return;
+  const r = ($('#combos')._rows || []).find((x) => String(x.g.id) === b.dataset.combo); if (!r) return;
+  for (const l of r.b.legs) { const dup = ticket.legs.some((x) => x.gid === String(r.g.id) && x.type === l.type && (x.side || '') === (l.side || '') && x.line === l.line); if (!dup) addLeg({ gid: String(r.g.id), type: l.type, side: l.side, line: l.line }); }
+  document.querySelectorAll('#games .chip').forEach((x) => x.setAttribute('aria-pressed', String(ticket.legs.some((l) => l.gid === x.dataset.gid && l.type === x.dataset.t && (x.dataset.t === 'over' || x.dataset.t === 'under' || l.side === x.dataset.s)))));
+  ticket.open = true; renderTicket();
+});
 $('#games').addEventListener('click', (e) => {
   const b = e.target.closest('.chip'); if (!b) return;
   const t = b.dataset.t, c = ctxById[b.dataset.gid]; if (!c) return;
