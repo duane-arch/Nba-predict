@@ -129,6 +129,13 @@ body.tk{padding-bottom:calc(190px + env(safe-area-inset-bottom))}
 .pk+.pk{border-top:1px solid var(--line)}
 .pk span{display:block;color:var(--mut);font-size:12px;font-weight:400}
 .pk>div:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.ocr{margin:2px 0 6px}
+.filebtn{display:flex;align-items:center;justify-content:center;cursor:pointer;margin-top:0}
+.oc{border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0;background:var(--bg)}
+.oc.dup{opacity:.55}
+.oc .oh{display:flex;gap:8px;align-items:center;font-weight:600;margin-bottom:8px;min-height:44px}
+.oc .oh input{width:22px;height:22px;flex:none}
+#ocrRaw{white-space:pre-wrap;font-size:11px;color:var(--mut);overflow-x:auto}
 .keybox{display:flex;gap:8px}
 .keybox input{flex:1;min-width:0;min-height:44px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:0 12px;font:inherit}
 .keybox .more{width:auto;margin:0;padding:0 16px}
@@ -176,6 +183,14 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
     <label class="jst">Bankroll de départ (€)<input id="jstart" type="number" inputmode="decimal" step="1" min="0" value="100"></label>
     <details class="addbet" open>
       <summary>Enregistrer un ticket joué</summary>
+      <div class="ocr">
+        <label class="more pri filebtn" for="ocrFile">Importer des captures Betclic</label>
+        <input id="ocrFile" type="file" accept="image/*" multiple hidden>
+        <div class="note" id="ocrMsg">La lecture se fait sur ton téléphone. Tu vérifies avant d'enregistrer.</div>
+        <div id="ocrOut"></div>
+        <details id="ocrRawBox" hidden><summary class="note">Texte lu (pour vérifier)</summary><pre id="ocrRaw"></pre></details>
+      </div>
+      <div class="note" style="margin:6px 0 10px">Ou saisis-le à la main :</div>
       <div class="ab-grid">
         <label>Type<select id="jfKind"><option value="single">Simple</option><option value="combo">Combiné</option></select></label>
         <label>Date<input id="jfDate" type="date"></label>
@@ -224,6 +239,7 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
     <button type="button" class="tab" data-tab="model" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6"/></svg></span><span>Modèle</span></button>
   </div>
 </nav>
+<script src="betparse.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

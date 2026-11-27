@@ -944,7 +944,7 @@ function betHtml(b) {
   const kind = b.manual ? (b.kind === 'combo' ? 'Combiné' : 'Simple') : (b.legs.length > 1 ? 'Combiné ' + b.legs.length : 'Simple');
   const when = new Date(b.at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
   const res = b.manual && b.status === 'open' ? `<div class="resbtns"><span>Résultat :</span><button type="button" data-res="won" data-id="${b.id}">Gagné</button><button type="button" data-res="lost" data-id="${b.id}">Perdu</button><button type="button" data-res="void" data-id="${b.id}">Remboursé</button></div>` : '';
-  return `<div class="bet"><div class="bh"><b>${kind} · cote ${fr(b.odds, 2)} · mise ${fr(b.stake, 2)} €</b><span class="${cls}">${st}${b.pnl ? ' ' + signed(b.pnl, 2) + ' €' : ''}</span></div>${legs}<div class="line">${b.p > 0 ? `Probabilité estimée ${(b.p * 100).toFixed(0)} % · ` : 'Saisi à la main · '}${when}</div>${res}<button type="button" class="del" data-del="${b.id}">Supprimer</button></div>`;
+  return `<div class="bet"><div class="bh"><b>${kind} · ${b.odds > 1 ? 'cote ' + fr(b.odds, 2) : 'cote inconnue'} · mise ${fr(b.stake, 2)} €</b><span class="${cls}">${st}${b.pnl ? ' ' + signed(b.pnl, 2) + ' €' : ''}</span></div>${legs}<div class="line">${b.p > 0 ? `Probabilité estimée ${(b.p * 100).toFixed(0)} % · ` : 'Saisi à la main · '}${when}</div>${res}<button type="button" class="del" data-del="${b.id}">Supprimer</button></div>`;
 }
 function renderJournal() {
   const s = journalStats(), tile = ([b, t]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(t)}</span></div>`;
@@ -1016,11 +1016,96 @@ $('#jfAdd').addEventListener('click', () => {
   $('#jfDesc').value = ''; $('#jfOdds').value = ''; $('#jfStake').value = ''; $('#jfMsg').textContent = 'Ticket ajouté. La bankroll est à jour.';
   renderJournal();
 });
+
+// ---------- Import de captures Betclic (lecture du texte sur le téléphone) ----------
+const TESS_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+let tessLib = null, ocrFound = [];
+function loadTess() {
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  if (tessLib) return tessLib;
+  tessLib = new Promise((ok, ko) => {
+    const s = document.createElement('script'); s.src = TESS_URL; s.crossOrigin = 'anonymous';
+    s.onload = () => (window.Tesseract ? ok(window.Tesseract) : ko(new Error('lecteur introuvable')));
+    s.onerror = () => { tessLib = null; ko(new Error('téléchargement du lecteur impossible (réseau)')); };
+    document.head.appendChild(s);
+  });
+  return tessLib;
+}
+async function prepImage(file) {
+  const bmp = await createImageBitmap(file);
+  const sc = bmp.width > 1500 ? 1500 / bmp.width : bmp.width < 900 ? 900 / bmp.width : 1;
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * sc); c.height = Math.round(bmp.height * sc);
+  const g = c.getContext('2d'); g.drawImage(bmp, 0, 0, c.width, c.height);
+  const im = g.getImageData(0, 0, c.width, c.height), d = im.data; let sum = 0;
+  for (let i = 0; i < d.length; i += 4) { const y = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]; d[i] = d[i + 1] = d[i + 2] = y; sum += y; }
+  if (sum / (d.length / 4) < 128) for (let i = 0; i < d.length; i += 4) { d[i] = d[i + 1] = d[i + 2] = 255 - d[i]; }
+  g.putImageData(im, 0, 0);
+  return c;
+}
+function ocrCard(t, i) {
+  const dup = journal.bets.some((b) => b.ref && b.ref === t.ref);
+  const sel = (v, o) => o.map(([k, n]) => `<option value="${k}"${k === v ? ' selected' : ''}>${n}</option>`).join('');
+  return `<div class="oc${dup ? ' dup' : ''}" data-i="${i}"><div class="oh"><input type="checkbox" class="ocOn" ${dup || t.stake === null ? '' : 'checked'} aria-label="Ajouter ce ticket"><span>${dup ? 'Déjà dans le journal' : 'Ticket ' + (i + 1)}</span></div>
+    <div class="ab-grid">
+      <label>Type<select class="ocKind">${sel(t.kind, [['single', 'Simple'], ['combo', 'Combiné']])}</select></label>
+      <label>Date<input class="ocDate" type="date" value="${esc(t.date)}"></label>
+      <label class="wide">Description<input class="ocDesc" type="text" maxlength="160" value="${esc(t.label)}" placeholder="Ticket Betclic"></label>
+      <label>Cote<input class="ocOdds" type="number" inputmode="decimal" step="0.01" min="1" value="${t.odds || ''}" placeholder="à saisir"></label>
+      <label>Mise (€)<input class="ocStake" type="number" inputmode="decimal" step="0.01" min="0" value="${t.stake ?? ''}"></label>
+      <label class="wide">Résultat<select class="ocRes">${sel(t.status || 'open', [['open', 'En cours'], ['won', 'Gagné'], ['lost', 'Perdu'], ['void', 'Remboursé']])}</select></label>
+    </div></div>`;
+}
+$('#ocrFile').addEventListener('change', async (e) => {
+  const files = [...e.target.files]; e.target.value = '';
+  if (!files.length) return;
+  const msg = $('#ocrMsg'); $('#ocrOut').innerHTML = ''; ocrFound = []; let raw = '';
+  try {
+    msg.textContent = 'Chargement du lecteur de texte (la première fois, quelques Mo)…';
+    const T = await loadTess();
+    const worker = await T.createWorker('fra', 1, { logger: (m) => { if (m.status === 'recognizing text') msg.textContent = `Lecture de la capture ${cur}/${files.length} : ${Math.round(m.progress * 100)} %`; else if (/load|init/.test(m.status)) msg.textContent = 'Préparation du lecteur…'; } });
+    await worker.setParameters({ tessedit_pageseg_mode: '6' });
+    var cur = 0;
+    for (const f of files) {
+      cur++;
+      const { data } = await worker.recognize(await prepImage(f));
+      raw += `--- capture ${cur} ---\n${data.text}\n`;
+      for (const t of BetParse.parseBetclic(data.text)) if (!ocrFound.some((x) => x.ref === t.ref)) ocrFound.push(t);
+    }
+    await worker.terminate();
+  } catch (err) { msg.textContent = 'Lecture impossible : ' + (err && err.message ? err.message : err) + '. Tu peux saisir le ticket à la main ci-dessous.'; return; }
+  $('#ocrRaw').textContent = raw; $('#ocrRawBox').hidden = !raw;
+  showOcr();
+});
+function showOcr() {
+  const msg = $('#ocrMsg');
+  if (!ocrFound.length) { msg.textContent = 'Aucun ticket reconnu. Vérifie que la capture montre bien la ligne « Réf » en bas du ticket.'; $('#ocrOut').innerHTML = ''; return; }
+  msg.textContent = `${ocrFound.length} ticket${ocrFound.length > 1 ? 's' : ''} détecté${ocrFound.length > 1 ? 's' : ''}. Vérifie surtout la mise et la cote, puis ajoute.`;
+  $('#ocrOut').innerHTML = ocrFound.map(ocrCard).join('') + '<button type="button" class="more pri" id="ocrAdd">Ajouter les tickets cochés</button>';
+}
+$('#ocrOut').addEventListener('click', (e) => {
+  if (!e.target.closest('#ocrAdd')) return;
+  let n = 0, bad = 0;
+  document.querySelectorAll('#ocrOut .oc').forEach((c) => {
+    if (!c.querySelector('.ocOn').checked) return;
+    const t = ocrFound[Number(c.dataset.i)], res = c.querySelector('.ocRes').value;
+    const stake = parseFloat(c.querySelector('.ocStake').value); let odds = parseFloat(c.querySelector('.ocOdds').value);
+    if (!(stake > 0) || (res !== 'lost' && !(odds >= 1))) { bad++; return; }
+    if (res === 'void') odds = 1;
+    if (journal.bets.some((b) => b.ref && b.ref === t.ref)) return;
+    const day = c.querySelector('.ocDate').value || t.date;
+    const b = { id: Date.now() + n, at: new Date(day + 'T' + (t.time || '12:00') + ':00').toISOString(), stake, odds: odds >= 1 ? odds : 0, p: 0, legs: [], manual: true, ref: t.ref, kind: c.querySelector('.ocKind').value, label: c.querySelector('.ocDesc').value.trim() || 'Ticket Betclic', status: res };
+    b.pnl = res === 'won' ? (t.gains && Math.abs(t.gains / stake - odds) < 0.02 ? t.gains - stake : stake * (odds - 1)) : res === 'lost' ? -stake : 0;
+    journal.bets.push(b); n++;
+  });
+  if (n) { saveJournal(); renderJournal(); }
+  $('#ocrMsg').textContent = bad ? `${n} ajouté${n > 1 ? 's' : ''}. ${bad} ticket${bad > 1 ? 's' : ''} sans mise ou sans cote valide : complète les champs puis réessaie.` : `${n} ticket${n > 1 ? 's' : ''} ajouté${n > 1 ? 's' : ''}. La bankroll est à jour.`;
+  if (!bad) { $('#ocrOut').innerHTML = ''; ocrFound = []; }
+});
 $('#tab-journal').addEventListener('click', (e) => {
   const r = e.target.closest('[data-res]');
   if (r) {
     const b = journal.bets.find((x) => String(x.id) === r.dataset.id);
-    if (b) { b.status = r.dataset.res; b.pnl = b.status === 'won' ? b.stake * (b.odds - 1) : b.status === 'lost' ? -b.stake : 0; saveJournal(); renderJournal(); }
+    if (b) { b.status = r.dataset.res; b.pnl = b.status === 'won' && b.odds > 1 ? b.stake * (b.odds - 1) : b.status === 'lost' ? -b.stake : 0; saveJournal(); renderJournal(); }
     return;
   }
   const d = e.target.closest('[data-del]'); if (!d) return;
