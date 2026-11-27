@@ -47,7 +47,7 @@
       if (/Mise\b/i.test(l) || /^\W*Gains?\b/i.test(l)) break;
       if (/\d{1,2}:\d{2}/.test(l) || /\b\d{2,3}\s+\d{2,3}\s+\d{2,3}/.test(l) || /\s\d{2,3}\s+\d{2,3}\s*$/.test(l)) break;
       if (MKT.test(clean(l))) continue;
-      const c = clean(l).replace(/([+-])\s*de\s*(\d)/i, '$1 de $2');
+      const c = clean(l).replace(/([+-])\s*de\s*(\d)/i, '$1 de $2').replace(/\bde\s*(\d{3})5\b/i, 'de $1,5');
       if (c.length > 2) sel.push(c);
     }
     return { kind, status, stake, gains, odds, label: sel.join(' & '), n: sel.length };

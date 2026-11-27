@@ -1034,13 +1034,62 @@ function loadTess() {
 async function prepImage(file) {
   const bmp = await createImageBitmap(file);
   const sc = bmp.width > 1500 ? 1500 / bmp.width : bmp.width < 900 ? 900 / bmp.width : 1;
-  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * sc); c.height = Math.round(bmp.height * sc);
-  const g = c.getContext('2d'); g.drawImage(bmp, 0, 0, c.width, c.height);
-  const im = g.getImageData(0, 0, c.width, c.height), d = im.data; let sum = 0;
+  const W = Math.round(bmp.width * sc), H = Math.round(bmp.height * sc);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'); g.drawImage(bmp, 0, 0, W, H);
+  const cc = document.createElement('canvas'); cc.width = W; cc.height = H; cc.getContext('2d').drawImage(c, 0, 0);   // copie couleur
+  const im = g.getImageData(0, 0, W, H), d = im.data; let sum = 0;
+  // rectangles jaunes (cotes) : grille de 4 px, composantes connexes
+  const gw = Math.ceil(W / 4), gh = Math.ceil(H / 4), cell = new Uint8Array(gw * gh);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const k = (y * W + x) * 4; if (d[k] > 200 && d[k + 1] > 165 && d[k + 2] < 120) cell[(y >> 2) * gw + (x >> 2)]++; }
+  for (let k = 0; k < cell.length; k++) cell[k] = cell[k] >= 8 ? 1 : 0;
+  const seen = new Uint8Array(cell.length), badges = [];
+  for (let s = 0; s < cell.length; s++) {
+    if (!cell[s] || seen[s]) continue;
+    const st = [s]; seen[s] = 1; let x0 = gw, x1 = 0, y0 = gh, y1 = 0, n = 0;
+    while (st.length) {
+      const p = st.pop(), px = p % gw, py = (p / gw) | 0; n++;
+      if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+      for (const q of [p - 1, p + 1, p - gw, p + gw]) if (q >= 0 && q < cell.length && cell[q] && !seen[q] && Math.abs((q % gw) - px) <= 1) { seen[q] = 1; st.push(q); }
+    }
+    const w = (x1 - x0 + 1) * 4, h = (y1 - y0 + 1) * 4;
+    if (w > W * 0.05 && w < W * 0.3 && w / h > 0.8 && w / h < 3 && n * 16 > w * h * 0.5) badges.push({ x: x0 * 4, y: y0 * 4, w, h });
+  }
   for (let i = 0; i < d.length; i += 4) { const y = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]; d[i] = d[i + 1] = d[i + 2] = y; sum += y; }
   if (sum / (d.length / 4) < 128) for (let i = 0; i < d.length; i += 4) { d[i] = d[i + 1] = d[i + 2] = 255 - d[i]; }
   g.putImageData(im, 0, 0);
-  return c;
+  for (const b of badges) {
+    const k = document.createElement('canvas'); k.width = (b.w + 12) * 3; k.height = (b.h + 12) * 3;
+    const kg = k.getContext('2d'); kg.filter = 'grayscale(1)'; kg.drawImage(cc, b.x - 6, b.y - 6, b.w + 12, b.h + 12, 0, 0, k.width, k.height); b.crop = k;
+  }
+  return { canvas: c, badges };
+}
+async function readBadges(worker, prep) {
+  if (!prep.badges.length) return [];
+  const out = [];
+  for (const b of prep.badges) {
+    let v = null;
+    for (const psm of ['8', '13']) {
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      const { data } = await worker.recognize(b.crop), m = data.text.replace(/\s/g, '').match(/(\d{1,3})[,.](\d{2})/);
+      if (m) { v = parseFloat(m[1] + '.' + m[2]); break; }
+    }
+    if (v && v >= 1.01 && v <= 500) out.push({ cy: b.y + b.h / 2, odds: v });
+  }
+  await worker.setParameters({ tessedit_pageseg_mode: '6' });
+  return out;
+}
+function attachBadges(tickets, lines, badges) {
+  const ys = [];
+  for (const l of lines || []) { const m = String(l.text).match(/R[ée]f\.?\s*:?\s*([0-9a-fA-F]{8,32})/); if (m) ys.push([m[1].toLowerCase(), (l.bbox.y0 + l.bbox.y1) / 2]); }
+  ys.sort((p, q) => p[1] - q[1]);
+  for (const b of badges) {
+    let prev = -1;
+    for (const [ref, y] of ys) {
+      if (b.cy > prev && b.cy <= y) { const t = tickets.find((x) => x.ref === ref); if (t && !(t.odds > 1)) { t.odds = b.odds; t.oddsBadge = true; } break; }
+      prev = y;
+    }
+  }
 }
 function ocrCard(t, i) {
   const dup = journal.bets.some((b) => b.ref && b.ref === t.ref);
@@ -1050,7 +1099,7 @@ function ocrCard(t, i) {
       <label>Type<select class="ocKind">${sel(t.kind, [['single', 'Simple'], ['combo', 'Combiné']])}</select></label>
       <label>Date<input class="ocDate" type="date" value="${esc(t.date)}"></label>
       <label class="wide">Description<input class="ocDesc" type="text" maxlength="160" value="${esc(t.label)}" placeholder="Ticket Betclic"></label>
-      <label>Cote<input class="ocOdds" type="number" inputmode="decimal" step="0.01" min="1" value="${t.odds || ''}" placeholder="à saisir"></label>
+      <label>${t.oddsBadge ? 'Cote (lue sur le jaune)' : 'Cote'}<input class="ocOdds" type="number" inputmode="decimal" step="0.01" min="1" value="${t.odds || ''}" placeholder="à saisir"></label>
       <label>Mise (€)<input class="ocStake" type="number" inputmode="decimal" step="0.01" min="0" value="${t.stake ?? ''}"></label>
       <label class="wide">Résultat<select class="ocRes">${sel(t.status || 'open', [['open', 'En cours'], ['won', 'Gagné'], ['lost', 'Perdu'], ['void', 'Remboursé']])}</select></label>
     </div></div>`;
@@ -1067,9 +1116,11 @@ $('#ocrFile').addEventListener('change', async (e) => {
     var cur = 0;
     for (const f of files) {
       cur++;
-      const { data } = await worker.recognize(await prepImage(f));
+      const prep = await prepImage(f), { data } = await worker.recognize(prep.canvas);
       raw += `--- capture ${cur} ---\n${data.text}\n`;
-      for (const t of BetParse.parseBetclic(data.text)) if (!ocrFound.some((x) => x.ref === t.ref)) ocrFound.push(t);
+      const ts = BetParse.parseBetclic(data.text);
+      try { attachBadges(ts, data.lines, await readBadges(worker, prep)); } catch (e2) { raw += 'cotes jaunes illisibles\n'; }
+      for (const t of ts) if (!ocrFound.some((x) => x.ref === t.ref)) ocrFound.push(t);
     }
     await worker.terminate();
   } catch (err) { msg.textContent = 'Lecture impossible : ' + (err && err.message ? err.message : err) + '. Tu peux saisir le ticket à la main ci-dessous.'; return; }
